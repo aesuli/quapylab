@@ -10,7 +10,9 @@ from quapylab import __version__
 from quapylab.config import ApplicationConfig, DeploymentMode
 from quapylab.domain.actor import desktop_actor
 from quapylab.nodes.registry import default_registry
+from quapylab.persistence.database import Database
 from quapylab.services.graph_validation import GraphValidationError, validate_workflow
+from quapylab.services.workspace import bootstrap_desktop_workspace
 from quapylab.workflow.schemas import WorkflowSpec
 
 
@@ -26,6 +28,16 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     application_config = ApplicationConfig.from_mapping(app.config)
     app.extensions["quapylab.config"] = application_config
     app.extensions["quapylab.node_registry"] = default_registry()
+    database_url = (
+        "sqlite+pysqlite:///:memory:"
+        if app.config.get("TESTING") and "QUAPYLAB_DATABASE_URL" not in app.config
+        else application_config.database_url
+    )
+    database = Database(database_url)
+    database.create_schema()
+    app.extensions["quapylab.database"] = database
+    if application_config.mode is DeploymentMode.DESKTOP:
+        bootstrap_desktop_workspace(database)
 
     @app.before_request
     def attach_actor() -> None:

@@ -2,6 +2,8 @@ from quapylab import __version__
 from quapylab.app import create_app
 from quapylab.config import DeploymentMode
 from quapylab.desktop import run_desktop
+from quapylab.domain.actor import desktop_actor
+from quapylab.persistence.models import Group, GroupMembership, MembershipRole, User
 
 
 def test_liveness() -> None:
@@ -77,3 +79,15 @@ def test_web_mode_is_explicit() -> None:
     application = create_app({"TESTING": True, "QUAPYLAB_MODE": "web"})
 
     assert application.extensions["quapylab.config"].mode is DeploymentMode.WEB
+
+
+def test_desktop_mode_bootstraps_its_implicit_personal_workspace() -> None:
+    application = create_app({"TESTING": True, "QUAPYLAB_MODE": "desktop"})
+    database = application.extensions["quapylab.database"]
+    actor = desktop_actor()
+
+    with database.transaction() as session:
+        assert session.get(User, str(actor.user_id)) is not None
+        assert session.get(Group, str(actor.group_id)) is not None
+        membership = session.query(GroupMembership).one()
+        assert membership.role == MembershipRole.OWNER
