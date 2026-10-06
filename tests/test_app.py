@@ -81,6 +81,16 @@ def test_web_mode_is_explicit() -> None:
     assert application.extensions["quapylab.config"].mode is DeploymentMode.WEB
 
 
+def test_desktop_session_is_implicit_without_identity_controls() -> None:
+    client = create_app({"TESTING": True, "QUAPYLAB_MODE": "desktop"}).test_client()
+
+    response = client.get("/api/v1/auth/session")
+
+    assert response.status_code == 200
+    assert response.get_json()["deployment_mode"] == "desktop"
+    assert response.get_json()["csrf_token"] is None
+
+
 def test_desktop_mode_bootstraps_its_implicit_personal_workspace() -> None:
     application = create_app({"TESTING": True, "QUAPYLAB_MODE": "desktop"})
     database = application.extensions["quapylab.database"]

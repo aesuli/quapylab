@@ -4,6 +4,8 @@ import argparse
 from collections.abc import Sequence
 
 from quapylab.app import create_app
+from quapylab.persistence.database import Database
+from quapylab.services.authentication import AuthenticationService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,6 +19,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     desktop = subparsers.add_parser("desktop", help="open QuaPy Lab in a native window")
     desktop.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
+
+    bootstrap = subparsers.add_parser("bootstrap-admin", help="create the first web administrator")
+    bootstrap.add_argument("--database-url", required=True)
+    bootstrap.add_argument("--login-name", required=True)
+    bootstrap.add_argument("--display-name", required=True)
+    bootstrap.add_argument("--password", required=True)
     return parser
 
 
@@ -29,5 +37,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         from quapylab.desktop import run_desktop
 
         return run_desktop(smoke_test=args.smoke_test)
+    if args.command == "bootstrap-admin":
+        database = Database(args.database_url)
+        database.create_schema()
+        with database.transaction() as session:
+            user = AuthenticationService().create_user(
+                session,
+                login_name=args.login_name,
+                display_name=args.display_name,
+                password=args.password,
+                is_system_administrator=True,
+            )
+        print(f"Created system administrator {user.login_name}.")
+        return 0
     raise AssertionError(f"unhandled command: {args.command}")
-

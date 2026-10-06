@@ -86,6 +86,7 @@ class WebSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    csrf_token: Mapped[str] = mapped_column(String(128))
 
 
 class AuditEvent(Base):
