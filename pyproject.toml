@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quapylab"
+version = "0.1.0a0"
+description = "A visual laboratory for reproducible QuaPy quantification experiments"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "BSD-3-Clause"
+authors = [{ name = "QuaPy Lab contributors" }]
+dependencies = [
+  "Flask>=3.1,<4",
+  "pydantic>=2.11,<3",
+  "platformdirs>=4.3,<5",
+  "quapy>=0.2.2,<0.3",
+  "SQLAlchemy>=2.0,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.15,<2",
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+  "ruff>=0.11,<1",
+]
+desktop = [
+  "pyinstaller>=6.12,<7",
+  "pywebview>=5.4,<6",
+]
+
+[project.scripts]
+quapylab = "quapylab.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+quapylab = ["py.typed", "static/**/*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+extend-exclude = [".bootstrap", ".uv-python", ".venv"]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["quapylab"]
+
