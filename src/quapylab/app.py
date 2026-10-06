@@ -29,6 +29,7 @@ from quapylab.services.datasets import DatasetService
 from quapylab.services.graph_validation import GraphValidationError, validate_workflow
 from quapylab.services.groups import GroupService
 from quapylab.services.projects import ProjectService
+from quapylab.services.runs import RunService
 from quapylab.services.workspace import bootstrap_desktop_workspace
 from quapylab.workflow.schemas import WorkflowSpec
 
@@ -59,6 +60,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     app.extensions["quapylab.login_throttle"] = LoginThrottle()
     app.extensions["quapylab.projects"] = ProjectService()
     app.extensions["quapylab.groups"] = GroupService()
+    app.extensions["quapylab.runs"] = RunService(app.extensions["quapylab.node_registry"])
     artifact_root = app.config.get("QUAPYLAB_ARTIFACT_ROOT")
     if artifact_root is None:
         artifact_root = (
@@ -456,6 +458,43 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
             )
             return jsonify(project_json(project)), 200
 
+    @app.post("/api/v1/projects/<project_id>/runs")
+    def enqueue_run(project_id: str) -> tuple[Any, int]:
+        payload = request_json()
+        revision_id = payload.get("workflow_revision_id")
+        seed = payload.get("seed", 0)
+        if not isinstance(revision_id, str) or not isinstance(seed, int) or isinstance(seed, bool):
+            raise ValueError("Workflow revision ID and integer seed are required.")
+        service: RunService = app.extensions["quapylab.runs"]
+        with database.transaction() as session:
+            run = service.enqueue(
+                session,
+                actor=g.actor,
+                project_id=project_id,
+                workflow_revision_id=revision_id,
+                seed=seed,
+            )
+            return jsonify(run_json(run)), 202
+
+    @app.get("/api/v1/runs/<run_id>")
+    def run(run_id: str) -> tuple[Any, int]:
+        service: RunService = app.extensions["quapylab.runs"]
+        with database.transaction() as session:
+            return jsonify(run_json(service.get(session, actor=g.actor, run_id=run_id))), 200
+
+    @app.post("/api/v1/runs/<run_id>/cancel")
+    def cancel_run(run_id: str) -> tuple[Any, int]:
+        service: RunService = app.extensions["quapylab.runs"]
+        with database.transaction() as session:
+            return jsonify(run_json(service.cancel(session, actor=g.actor, run_id=run_id))), 200
+
+    @app.get("/api/v1/runs/<run_id>/nodes")
+    def run_nodes(run_id: str) -> tuple[Any, int]:
+        service: RunService = app.extensions["quapylab.runs"]
+        with database.transaction() as session:
+            nodes = service.list_nodes(session, actor=g.actor, run_id=run_id)
+            return jsonify({"items": [node_run_json(item) for item in nodes]}), 200
+
     @app.post("/api/v1/projects/<project_id>/workflows")
     def create_workflow(project_id: str) -> tuple[Any, int]:
         payload = request_json()
@@ -644,6 +683,32 @@ def artifact_json(artifact: Any) -> dict[str, Any]:
         "size_bytes": artifact.size_bytes,
         "sha256": artifact.sha256,
         "serialization": artifact.serialization,
+    }
+
+
+def run_json(run: Any) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "project_id": run.project_id,
+        "workflow_revision_id": run.workflow_revision_id,
+        "status": run.status,
+        "seed": run.seed,
+        "environment": run.environment,
+        "error_summary": run.error_summary,
+    }
+
+
+def node_run_json(node: Any) -> dict[str, Any]:
+    return {
+        "id": node.id,
+        "node_id": node.node_id,
+        "node_type": node.node_type,
+        "node_version": node.node_version,
+        "state": node.state,
+        "resolved_config": node.resolved_config,
+        "logs": node.logs,
+        "error": node.error,
+        "output_artifact_ids": node.output_artifact_ids,
     }
 
 

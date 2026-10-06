@@ -1,11 +1,15 @@
 """Command-line entry points for QuaPy Lab."""
 
 import argparse
+import time
 from collections.abc import Sequence
 
 from quapylab.app import create_app
+from quapylab.execution.local_worker import LocalWorker, unavailable_node_executor
+from quapylab.nodes.registry import default_registry
 from quapylab.persistence.database import Database
 from quapylab.services.authentication import AuthenticationService
+from quapylab.services.runs import RunService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--login-name", required=True)
     bootstrap.add_argument("--display-name", required=True)
     bootstrap.add_argument("--password", required=True)
+
+    worker = subparsers.add_parser("worker", help="run the local workflow worker")
+    worker.add_argument("--database-url", required=True)
+    worker.add_argument("--once", action="store_true", help="process at most one queued run")
+    worker.add_argument("--poll-seconds", default=1.0, type=float)
     return parser
 
 
@@ -50,4 +59,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         print(f"Created system administrator {user.login_name}.")
         return 0
+    if args.command == "worker":
+        if args.poll_seconds <= 0:
+            raise ValueError("--poll-seconds must be greater than zero.")
+        database = Database(args.database_url)
+        database.create_schema()
+        worker = LocalWorker(database, RunService(default_registry()), unavailable_node_executor)
+        recovered = worker.recover()
+        if recovered:
+            print(f"Marked {recovered} interrupted run(s).")
+        if args.once:
+            return 0 if worker.run_once() else 1
+        while True:
+            if not worker.run_once():
+                time.sleep(args.poll_seconds)
     raise AssertionError(f"unhandled command: {args.command}")
