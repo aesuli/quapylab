@@ -2,6 +2,7 @@
 
 import hmac
 import re
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from quapylab.domain.actor import desktop_actor
 from quapylab.nodes.registry import default_registry
 from quapylab.persistence.database import Database
 from quapylab.persistence.models import MembershipRole, User, WebSession
+from quapylab.services.artifacts import ArtifactService, LocalArtifactStore
 from quapylab.services.authentication import (
     AuthenticationError,
     AuthenticationService,
@@ -57,7 +59,16 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     app.extensions["quapylab.login_throttle"] = LoginThrottle()
     app.extensions["quapylab.projects"] = ProjectService()
     app.extensions["quapylab.groups"] = GroupService()
-    app.extensions["quapylab.datasets"] = DatasetService()
+    artifact_root = app.config.get("QUAPYLAB_ARTIFACT_ROOT")
+    if artifact_root is None:
+        artifact_root = (
+            tempfile.mkdtemp(prefix="quapylab-artifacts-")
+            if app.config.get("TESTING")
+            else Path(".quapylab") / "artifacts"
+        )
+    artifacts = ArtifactService(LocalArtifactStore(Path(artifact_root)))
+    app.extensions["quapylab.artifacts"] = artifacts
+    app.extensions["quapylab.datasets"] = DatasetService(artifacts)
     if not config or "SESSION_COOKIE_SECURE" not in config:
         app.config["SESSION_COOKIE_SECURE"] = not app.config.get("TESTING", False)
     if application_config.mode is DeploymentMode.DESKTOP:
@@ -361,14 +372,15 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
             label_column = request.form.get("label_column") or None
             if upload is None:
                 raise ValueError("A CSV or TSV file is required.")
-            if not upload.filename.lower().endswith((".csv", ".tsv")):
+            filename = upload.filename
+            if not filename or not filename.lower().endswith((".csv", ".tsv")):
                 raise ValueError("Dataset files must be CSV or TSV.")
             version = service.ingest(
                 session,
                 actor=g.actor,
                 project_id=project_id,
                 name=name,
-                filename=upload.filename,
+                filename=filename,
                 content=upload.read(),
                 label_column=label_column,
             )
@@ -383,6 +395,23 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                     service.get_version(session, actor=g.actor, version_id=version_id)
                 )
             ), 200
+
+    @app.get("/api/v1/artifacts/<artifact_id>")
+    def artifact(artifact_id: str) -> tuple[Any, int]:
+        service: ArtifactService = app.extensions["quapylab.artifacts"]
+        with database.transaction() as session:
+            item = service.get(session, actor=g.actor, artifact_id=artifact_id)
+            return jsonify(artifact_json(item)), 200
+
+    @app.get("/api/v1/artifacts/<artifact_id>/download")
+    def download_artifact(artifact_id: str) -> Response:
+        service: ArtifactService = app.extensions["quapylab.artifacts"]
+        with database.transaction() as session:
+            item, content = service.read(session, actor=g.actor, artifact_id=artifact_id)
+        response = Response(content, mimetype=item.media_type)
+        response.headers["Content-Disposition"] = f'attachment; filename="{item.sha256}"'
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @app.get("/api/v1/dataset-sources/quapy")
     def quapy_dataset_sources() -> tuple[Any, int]:
@@ -604,6 +633,17 @@ def dataset_version_json(version: Any) -> dict[str, Any]:
         "source": version.source,
         "ingestion_report": version.ingestion_report,
         "artifact_hashes": version.artifact_hashes,
+    }
+
+
+def artifact_json(artifact: Any) -> dict[str, Any]:
+    return {
+        "id": artifact.id,
+        "kind": artifact.kind,
+        "media_type": artifact.media_type,
+        "size_bytes": artifact.size_bytes,
+        "sha256": artifact.sha256,
+        "serialization": artifact.serialization,
     }
 
 

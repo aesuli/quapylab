@@ -203,6 +203,7 @@ class NodeRun(Base):
 
 class Artifact(Base):
     __tablename__ = "artifacts"
+    __table_args__ = (UniqueConstraint("group_id", "sha256", name="uq_artifact_group_sha256"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     group_id: Mapped[str] = mapped_column(ForeignKey("groups.id"), index=True)
@@ -212,7 +213,7 @@ class Artifact(Base):
     media_type: Mapped[str] = mapped_column(String(128))
     size_bytes: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64), index=True)
-    storage_key: Mapped[str] = mapped_column(String(512), unique=True)
+    storage_key: Mapped[str] = mapped_column(String(512))
     serialization: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

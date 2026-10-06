@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import pickle
 from typing import Any
 
 from sqlalchemy import select
@@ -11,12 +12,14 @@ from sqlalchemy.orm import Session
 
 from quapylab.domain.actor import ActorContext
 from quapylab.persistence.models import Dataset, DatasetVersion
+from quapylab.services.artifacts import ArtifactService
 from quapylab.services.projects import ProjectService
 
 
 class DatasetService:
-    def __init__(self) -> None:
+    def __init__(self, artifacts: ArtifactService) -> None:
         self._projects = ProjectService()
+        self._artifacts = artifacts
 
     def ingest(
         self,
@@ -52,6 +55,14 @@ class DatasetService:
         classes = (
             sorted({row[label_column] for row in rows if row[label_column]}) if label_column else []
         )
+        source_artifact = self._artifacts.create(
+            session,
+            group_id=project.group_id,
+            kind="dataset-source",
+            media_type="text/tab-separated-values" if delimiter == "\t" else "text/csv",
+            content=content,
+            serialization={"format": "tsv" if delimiter == "\t" else "csv", "filename": filename},
+        )
         dataset = Dataset(
             project_id=project.id, name=name.strip(), is_labelled=label_column is not None
         )
@@ -62,7 +73,12 @@ class DatasetService:
             schema=schema,
             row_count=len(rows),
             classes=classes,
-            source={"filename": filename, "format": "tsv" if delimiter == "\t" else "csv"},
+            source={
+                "filename": filename,
+                "format": "tsv" if delimiter == "\t" else "csv",
+                "artifact_id": source_artifact.id,
+            },
+            artifact_hashes=[source_artifact.sha256],
             ingestion_report={"preview": rows[:100], "label_column": label_column},
         )
         session.add(version)
@@ -72,7 +88,7 @@ class DatasetService:
 
     @staticmethod
     def quapy_sources() -> list[dict[str, Any]]:
-        from quapy.data import datasets
+        from quapy.data import datasets  # type: ignore[import-untyped]
 
         return [
             {
@@ -128,6 +144,14 @@ class DatasetService:
             "columns": _quapy_columns(train.instances),
             "splits": {"training_rows": len(train), "test_rows": len(test)},
         }
+        materialization = self._artifacts.create(
+            session,
+            group_id=project.group_id,
+            kind="quapy-materialization",
+            media_type="application/vnd.quapylab.quapy-materialization+pickle",
+            content=pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL),
+            serialization={"format": "pickle", "trusted_producer": "quapy-loader"},
+        )
         dataset = Dataset(project_id=project.id, name=dataset_name, is_labelled=True)
         session.add(dataset)
         session.flush()
@@ -142,7 +166,9 @@ class DatasetService:
                 "loader": source_id,
                 "dataset": dataset_name,
                 "options": normalized,
+                "artifact_id": materialization.id,
             },
+            artifact_hashes=[materialization.sha256],
             ingestion_report={
                 "preview": [],
                 "splits": {"training_rows": len(train), "test_rows": len(test)},
