@@ -54,6 +54,16 @@ class ProjectService:
         self._require(session, actor, project.group_id, Permission.READ_PROJECT)
         return project
 
+    def list_workflows(
+        self, session: Session, *, actor: ActorContext, project_id: str
+    ) -> list[Workflow]:
+        project = self.get_project(session, actor=actor, project_id=project_id)
+        return list(
+            session.scalars(
+                select(Workflow).where(Workflow.project_id == project.id).order_by(Workflow.name)
+            )
+        )
+
     def create_workflow(
         self,
         session: Session,

@@ -1,85 +1,50 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { WorkflowEditor } from './WorkflowEditor'
 
-type Session = {
-  authenticated: boolean
-  deployment_mode: 'desktop' | 'web'
-  user_id: string
-  active_group_id: string
-  csrf_token: string | null
-}
-
+type Role = 'owner' | 'administrator' | 'editor' | 'viewer'
+type Session = { authenticated: boolean; deployment_mode: 'desktop' | 'web'; user_id: string; active_group_id: string; csrf_token: string | null }
 type Project = { id: string; name: string; description: string }
+type Group = { id: string; name: string; slug: string; type: 'personal' | 'shared'; role?: Role }
+type Member = { user_id: string; role: Role; login_name: string | null; display_name: string | null }
 type ApiError = { error?: { message?: string } }
+const roles: Role[] = ['owner', 'administrator', 'editor', 'viewer']
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { credentials: 'same-origin', ...init })
-  if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as ApiError
-    throw new Error(body.error?.message ?? 'The request could not be completed.')
-  }
-  return response.json() as Promise<T>
+  if (!response.ok) { const body = await response.json().catch(() => ({})) as ApiError; throw new Error(body.error?.message ?? 'The request could not be completed.') }
+  return response.status === 204 ? undefined as T : response.json() as Promise<T>
 }
+const csrf = (session: Session): Record<string, string> => session.csrf_token ? { 'X-CSRF-Token': session.csrf_token } : {}
+const errorText = (reason: unknown, fallback: string) => reason instanceof Error ? reason.message : fallback
+const slugify = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
 
 function Login({ onAuthenticated }: { onAuthenticated: (session: Session) => void }) {
-  const [loginName, setLoginName] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [loginName, setLoginName] = useState(''); const [password, setPassword] = useState(''); const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false)
+  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(null); try { await request('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login_name: loginName, password }) }); onAuthenticated(await request<Session>('/api/v1/auth/session')) } catch (reason) { setError(errorText(reason, 'Login failed.')) } finally { setBusy(false) } }
+  return <main className="auth-shell"><form className="login-card" onSubmit={submit}><p className="eyebrow">QuaPy Lab</p><h1>Welcome back</h1><p>Sign in to your reproducible quantification workspace.</p><label>Login name<input autoComplete="username" value={loginName} onChange={e => setLoginName(e.target.value)} /></label><label>Password<input autoComplete="current-password" type="password" value={password} onChange={e => setPassword(e.target.value)} /></label>{error && <p className="form-error" role="alert">{error}</p>}<button disabled={busy} type="submit">{busy ? 'Signing in…' : 'Sign in'}</button></form></main>
+}
 
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    try {
-      await request('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login_name: loginName, password }) })
-      onAuthenticated(await request<Session>('/api/v1/auth/session'))
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Login failed.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return <main className="auth-shell"><form className="login-card" onSubmit={submit}><p className="eyebrow">QuaPy Lab</p><h1>Welcome back</h1><p>Sign in to your reproducible quantification workspace.</p><label>Login name<input autoComplete="username" value={loginName} onChange={(event) => setLoginName(event.target.value)} /></label><label>Password<input autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="form-error" role="alert">{error}</p>}<button disabled={busy} type="submit">{busy ? 'Signing in…' : 'Sign in'}</button></form></main>
+function Members({ session, group, members, close, reload }: { session: Session; group: Group; members: Member[]; close: () => void; reload: () => Promise<void> }) {
+  const [userId, setUserId] = useState(''); const [role, setRole] = useState<Role>('editor'); const [error, setError] = useState<string | null>(null)
+  const owner = group.role === 'owner'; const manages = owner || group.role === 'administrator'; const choices = roles
+  async function add(event: FormEvent) { event.preventDefault(); setError(null); try { await request(`/api/v1/groups/${group.id}/members`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...csrf(session) }, body: JSON.stringify({ user_id: userId.trim(), role }) }); setUserId(''); await reload() } catch (reason) { setError(errorText(reason, 'Could not add member.')) } }
+  async function change(member: Member, next: Role) { setError(null); try { await request(`/api/v1/groups/${group.id}/members/${member.user_id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...csrf(session) }, body: JSON.stringify({ role: next }) }); await reload() } catch (reason) { setError(errorText(reason, 'Could not update the role.')); await reload() } }
+  async function remove(member: Member) { if (!window.confirm(`Remove ${member.display_name || member.login_name || member.user_id} from this group?`)) return; setError(null); try { await request<void>(`/api/v1/groups/${group.id}/members/${member.user_id}`, { method: 'DELETE', headers: csrf(session) }); await reload() } catch (reason) { setError(errorText(reason, 'Could not remove member.')) } }
+  return <aside className="members-panel" aria-label="Group members"><div className="panel-heading"><div><p className="eyebrow">Shared group</p><h2>{group.name}</h2></div><button className="quiet-button" onClick={close}>Close</button></div><p className="panel-copy">Your role: <strong>{group.role}</strong></p>{error && <p className="form-error" role="alert">{error}</p>}<div className="member-list">{members.map(member => { const editable = manages && (owner || member.role !== 'owner'); return <div className="member-row" key={member.user_id}><div><strong>{member.display_name || member.login_name || 'Member'}</strong><span>{member.login_name ? `@${member.login_name}` : member.user_id}</span></div><select disabled={!editable} value={member.role} aria-label={`Role for ${member.display_name || member.user_id}`} onChange={e => void change(member, e.target.value as Role)}>{choices.map(item => <option disabled={!owner && item === 'owner'} key={item}>{item}</option>)}</select>{editable && <button className="icon-button danger" aria-label={`Remove ${member.display_name || member.user_id}`} onClick={() => void remove(member)}>×</button>}</div> })}</div>{manages ? <form className="member-form" onSubmit={add}><h3>Add existing user</h3><label>User ID<input required value={userId} placeholder="User UUID" onChange={e => setUserId(e.target.value)} /></label><label>Role<select value={role} onChange={e => setRole(e.target.value as Role)}>{choices.map(item => <option disabled={!owner && item === 'owner'} key={item}>{item}</option>)}</select></label><button type="submit">Add member</button></form> : <p className="muted">Only owners and administrators can manage members.</p>}</aside>
 }
 
 function Workspace({ session, onLogout }: { session: Session; onLogout: () => void }) {
-  const [projects, setProjects] = useState<Project[]>([])
-  const [error, setError] = useState<string | null>(null)
-  const [creating, setCreating] = useState(false)
-  const [projectName, setProjectName] = useState('')
-
-  useEffect(() => {
-    void request<{ items: Project[] }>(`/api/v1/groups/${session.active_group_id}/projects`)
-      .then((result) => setProjects(result.items))
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Could not load projects.'))
-  }, [session.active_group_id])
-
-  async function createProject(event: FormEvent) {
-    event.preventDefault()
-    if (!projectName.trim()) return
-    try {
-      const project = await request<Project>(`/api/v1/groups/${session.active_group_id}/projects`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(session.csrf_token ? { 'X-CSRF-Token': session.csrf_token } : {}) },
-        body: JSON.stringify({ name: projectName }),
-      })
-      setProjects((current) => [...current, project].sort((left, right) => left.name.localeCompare(right.name)))
-      setProjectName('')
-      setCreating(false)
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not create project.')
-    }
-  }
-
-  return <main className="workspace-shell"><header className="topbar"><div><p className="eyebrow">Visual quantification workbench</p><h1>QuaPy Lab</h1></div>{session.deployment_mode === 'web' && <button className="quiet-button" onClick={onLogout}>Sign out</button>}</header><section className="workspace"><aside className="project-sidebar"><div className="sidebar-heading"><div><p className="eyebrow">{session.deployment_mode === 'desktop' ? 'Personal workspace' : 'Active group'}</p><h2>Projects</h2></div><button aria-label="Create project" onClick={() => setCreating(true)}>+</button></div>{creating && <form className="new-project" onSubmit={createProject}><input autoFocus aria-label="Project name" placeholder="Project name" value={projectName} onChange={(event) => setProjectName(event.target.value)} /><button type="submit">Create</button></form>}{error && <p className="form-error" role="alert">{error}</p>}<nav aria-label="Projects">{projects.length ? projects.map((project) => <button className="project-row" key={project.id}><strong>{project.name}</strong><span>{project.description || 'Untitled experiment'}</span></button>) : <p className="empty-state">Create a project to start an experiment.</p>}</nav></aside><section className="welcome-panel"><p className="eyebrow">Start here</p><h2>Build a reproducible workflow</h2><p>Projects hold versioned workflow graphs, datasets, runs, and resulting model artifacts.</p><div className="workflow-placeholder"><span>Dataset</span><i>→</i><span>Classifier</span><i>→</i><span>Quantifier</span><i>→</i><span>Evaluation</span></div></section></section></main>
+  const [groups, setGroups] = useState<Group[]>([]); const [activeId, setActiveId] = useState(session.active_group_id); const [projects, setProjects] = useState<Project[]>([]); const [selectedProject, setSelectedProject] = useState<Project | null>(null); const [members, setMembers] = useState<Member[]>([]); const [error, setError] = useState<string | null>(null); const [creating, setCreating] = useState(false); const [groupForm, setGroupForm] = useState(false); const [membersOpen, setMembersOpen] = useState(false); const [projectName, setProjectName] = useState(''); const [groupName, setGroupName] = useState('')
+  const active = useMemo(() => groups.find(group => group.id === activeId), [groups, activeId])
+  const reloadGroups = async () => { const result = await request<{ items: Group[] }>('/api/v1/groups'); setGroups(result.items); return result.items }
+  const reloadMembers = async () => { if (!active || active.type === 'personal') return; const result = await request<{ items: Member[] }>(`/api/v1/groups/${active.id}/members`); setMembers(result.items) }
+  useEffect(() => { void reloadGroups().catch(reason => setError(errorText(reason, 'Could not load groups.'))) }, [])
+  useEffect(() => { setSelectedProject(null); void request<{ items: Project[] }>(`/api/v1/groups/${activeId}/projects`).then(result => setProjects(result.items)).catch(reason => setError(errorText(reason, 'Could not load projects.'))) }, [activeId])
+  useEffect(() => { setMembersOpen(false); setMembers([]); void reloadMembers().catch(reason => setError(errorText(reason, 'Could not load members.'))) }, [activeId, active?.type])
+  async function createProject(event: FormEvent) { event.preventDefault(); if (!projectName.trim()) return; try { const project = await request<Project>(`/api/v1/groups/${activeId}/projects`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...csrf(session) }, body: JSON.stringify({ name: projectName }) }); setProjects(current => [...current, project].sort((a, b) => a.name.localeCompare(b.name))); setProjectName(''); setCreating(false) } catch (reason) { setError(errorText(reason, 'Could not create project.')) } }
+  async function createGroup(event: FormEvent) { event.preventDefault(); const name = groupName.trim(); if (!name) return; try { const group = await request<Group>('/api/v1/groups', { method: 'POST', headers: { 'Content-Type': 'application/json', ...csrf(session) }, body: JSON.stringify({ name, slug: slugify(name) }) }); setGroups(current => [...current, { ...group, role: 'owner' as Role }].sort((a, b) => a.name.localeCompare(b.name))); setActiveId(group.id); setGroupName(''); setGroupForm(false) } catch (reason) { setError(errorText(reason, 'Could not create group.')) } }
+  const canCreate = active?.role !== 'viewer'
+  return <main className="workspace-shell"><header className="topbar"><div><p className="eyebrow">Visual quantification workbench</p><h1>QuaPy Lab</h1></div>{session.deployment_mode === 'web' && <button className="quiet-button" onClick={onLogout}>Sign out</button>}</header><section className="workspace"><aside className="project-sidebar"><div className="sidebar-heading"><div><p className="eyebrow">{session.deployment_mode === 'desktop' ? 'Personal workspace' : 'Workspace'}</p><h2>Projects</h2></div>{canCreate && <button aria-label="Create project" onClick={() => setCreating(true)}>+</button>}</div>{session.deployment_mode === 'web' && <div className="group-selector"><label>Active group<select value={activeId} onChange={e => setActiveId(e.target.value)}>{groups.map(group => <option key={group.id} value={group.id}>{group.name}{group.role ? ` · ${group.role}` : ''}</option>)}</select></label>{active?.type === 'shared' && <button className="link-button" onClick={() => setMembersOpen(true)}>Manage members</button>}<button className="link-button" onClick={() => setGroupForm(true)}>Create shared group</button></div>}{groupForm && <form className="new-project" onSubmit={createGroup}><input autoFocus aria-label="Group name" placeholder="Group name" value={groupName} onChange={e => setGroupName(e.target.value)} /><button>Create</button></form>}{creating && <form className="new-project" onSubmit={createProject}><input autoFocus aria-label="Project name" placeholder="Project name" value={projectName} onChange={e => setProjectName(e.target.value)} /><button>Create</button></form>}{error && <p className="form-error" role="alert">{error}</p>}<nav aria-label="Projects">{projects.length ? projects.map(project => <button className="project-row" key={project.id} onClick={() => setSelectedProject(project)}><strong>{project.name}</strong><span>{project.description || 'Untitled experiment'}</span></button>) : <p className="empty-state">{canCreate ? 'Create a project to start an experiment.' : 'No projects are available in this group.'}</p>}</nav></aside>{selectedProject ? <WorkflowEditor projectId={selectedProject.id} editable={canCreate} session={session} /> : <section className="welcome-panel"><p className="eyebrow">{active?.name || 'Workspace'}</p><h2>Build a reproducible workflow</h2><p>Select a project to edit a versioned workflow.</p></section>}{membersOpen && active && <Members session={session} group={active} members={members} close={() => setMembersOpen(false)} reload={reloadMembers} />}</section></main>
 }
 
-export function App() {
-  const [session, setSession] = useState<Session | null>(null)
-  const [loading, setLoading] = useState(true)
-  useEffect(() => { void request<Session>('/api/v1/auth/session').then(setSession).catch(() => setSession(null)).finally(() => setLoading(false)) }, [])
-  if (loading) return <main className="loading">Loading QuaPy Lab…</main>
-  if (!session) return <Login onAuthenticated={setSession} />
-  return <Workspace session={session} onLogout={() => { void request('/api/v1/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': session.csrf_token ?? '' } }).finally(() => setSession(null)) }} />
-}
+export function App() { const [session, setSession] = useState<Session | null>(null); const [loading, setLoading] = useState(true); useEffect(() => { void request<Session>('/api/v1/auth/session').then(setSession).catch(() => setSession(null)).finally(() => setLoading(false)) }, []); if (loading) return <main className="loading">Loading QuaPy Lab…</main>; if (!session) return <Login onAuthenticated={setSession} />; return <Workspace session={session} onLogout={() => { void request('/api/v1/auth/logout', { method: 'POST', headers: csrf(session) }).finally(() => setSession(null)) }} /> }

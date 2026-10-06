@@ -14,7 +14,7 @@ from quapylab.config import ApplicationConfig, DeploymentMode
 from quapylab.domain.actor import desktop_actor
 from quapylab.nodes.registry import default_registry
 from quapylab.persistence.database import Database
-from quapylab.persistence.models import MembershipRole, WebSession
+from quapylab.persistence.models import MembershipRole, User, WebSession
 from quapylab.services.authentication import (
     AuthenticationError,
     AuthenticationService,
@@ -23,6 +23,7 @@ from quapylab.services.authentication import (
     utc_now,
 )
 from quapylab.services.authorization import AuthorizationError
+from quapylab.services.datasets import DatasetService
 from quapylab.services.graph_validation import GraphValidationError, validate_workflow
 from quapylab.services.groups import GroupService
 from quapylab.services.projects import ProjectService
@@ -56,6 +57,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     app.extensions["quapylab.login_throttle"] = LoginThrottle()
     app.extensions["quapylab.projects"] = ProjectService()
     app.extensions["quapylab.groups"] = GroupService()
+    app.extensions["quapylab.datasets"] = DatasetService()
     if not config or "SESSION_COOKIE_SECURE" not in config:
         app.config["SESSION_COOKIE_SECURE"] = not app.config.get("TESTING", False)
     if application_config.mode is DeploymentMode.DESKTOP:
@@ -258,7 +260,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 return jsonify(
                     {
                         "items": [
-                            membership_json(item)
+                            membership_json(item, session.get(User, item.user_id))
                             for item in service.list_members(
                                 session, actor=g.actor, group_id=group_id
                             )
@@ -277,7 +279,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 role=MembershipRole(role),
             )
             session.flush()
-            return jsonify(membership_json(membership)), 201
+            return jsonify(membership_json(membership, session.get(User, membership.user_id))), 201
 
     @app.route("/api/v1/groups/<group_id>/members/<user_id>", methods=["PATCH", "DELETE"])
     def group_member(group_id: str, user_id: str) -> tuple[Any, int]:
@@ -299,7 +301,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 user_id=user_id,
                 role=MembershipRole(role),
             )
-            return jsonify(membership_json(membership)), 200
+            return jsonify(membership_json(membership, session.get(User, membership.user_id))), 200
 
     @app.post("/api/v1/workflows/validate")
     def validate_workflow_route() -> tuple[Any, int]:
@@ -339,6 +341,76 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 project_json(service.get_project(session, actor=g.actor, project_id=project_id))
             ), 200
 
+    @app.route("/api/v1/projects/<project_id>/datasets", methods=["GET", "POST"])
+    def datasets(project_id: str) -> tuple[Any, int]:
+        service: DatasetService = app.extensions["quapylab.datasets"]
+        with database.transaction() as session:
+            if request.method == "GET":
+                return jsonify(
+                    {
+                        "items": [
+                            dataset_json(item)
+                            for item in service.list_datasets(
+                                session, actor=g.actor, project_id=project_id
+                            )
+                        ]
+                    }
+                ), 200
+            upload = request.files.get("file")
+            name = request.form.get("name", "")
+            label_column = request.form.get("label_column") or None
+            if upload is None:
+                raise ValueError("A CSV or TSV file is required.")
+            if not upload.filename.lower().endswith((".csv", ".tsv")):
+                raise ValueError("Dataset files must be CSV or TSV.")
+            version = service.ingest(
+                session,
+                actor=g.actor,
+                project_id=project_id,
+                name=name,
+                filename=upload.filename,
+                content=upload.read(),
+                label_column=label_column,
+            )
+            return jsonify(dataset_version_json(version)), 201
+
+    @app.get("/api/v1/dataset-versions/<version_id>")
+    def dataset_version(version_id: str) -> tuple[Any, int]:
+        service: DatasetService = app.extensions["quapylab.datasets"]
+        with database.transaction() as session:
+            return jsonify(
+                dataset_version_json(
+                    service.get_version(session, actor=g.actor, version_id=version_id)
+                )
+            ), 200
+
+    @app.get("/api/v1/dataset-sources/quapy")
+    def quapy_dataset_sources() -> tuple[Any, int]:
+        return jsonify({"items": DatasetService.quapy_sources()}), 200
+
+    @app.post("/api/v1/projects/<project_id>/datasets/quapy")
+    def ingest_quapy_dataset(project_id: str) -> tuple[Any, int]:
+        payload = request_json()
+        source_id, dataset_name = payload.get("source_id"), payload.get("dataset_name")
+        options = payload.get("options", {})
+        if (
+            not isinstance(source_id, str)
+            or not isinstance(dataset_name, str)
+            or not isinstance(options, dict)
+        ):
+            raise ValueError("QuaPy source, dataset name, and options are required.")
+        service: DatasetService = app.extensions["quapylab.datasets"]
+        with database.transaction() as session:
+            version = service.ingest_quapy(
+                session,
+                actor=g.actor,
+                project_id=project_id,
+                source_id=source_id,
+                dataset_name=dataset_name,
+                options=options,
+            )
+            return jsonify(dataset_version_json(version)), 201
+
     @app.post("/api/v1/projects/<project_id>/transfer")
     def transfer_project(project_id: str) -> tuple[Any, int]:
         payload = request_json()
@@ -373,6 +445,21 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
             )
             session.flush()
             return jsonify(workflow_json(item)), 201
+
+    @app.get("/api/v1/projects/<project_id>/workflows")
+    def project_workflows(project_id: str) -> tuple[Any, int]:
+        service: ProjectService = app.extensions["quapylab.projects"]
+        with database.transaction() as session:
+            return jsonify(
+                {
+                    "items": [
+                        workflow_json(item)
+                        for item in service.list_workflows(
+                            session, actor=g.actor, project_id=project_id
+                        )
+                    ]
+                }
+            ), 200
 
     @app.get("/api/v1/workflows/<workflow_id>")
     def workflow(workflow_id: str) -> tuple[Any, int]:
@@ -456,8 +543,15 @@ def group_json(group: Any, membership: Any | None) -> dict[str, Any]:
     return item
 
 
-def membership_json(membership: Any) -> dict[str, Any]:
-    return {"user_id": membership.user_id, "group_id": membership.group_id, "role": membership.role}
+def membership_json(membership: Any, user: User | None = None) -> dict[str, Any]:
+    """Return membership data suitable for both API clients and the group UI."""
+    return {
+        "user_id": membership.user_id,
+        "group_id": membership.group_id,
+        "role": membership.role,
+        "login_name": user.login_name if user else None,
+        "display_name": user.display_name if user else None,
+    }
 
 
 def project_json(project: Any) -> dict[str, Any]:
@@ -487,6 +581,29 @@ def revision_json(revision: Any) -> dict[str, Any]:
         "schema_version": revision.schema_version,
         "graph": revision.graph,
         "content_hash": revision.content_hash,
+    }
+
+
+def dataset_json(dataset: Any) -> dict[str, Any]:
+    return {
+        "id": dataset.id,
+        "project_id": dataset.project_id,
+        "name": dataset.name,
+        "is_labelled": dataset.is_labelled,
+        "current_version_id": dataset.current_version_id,
+    }
+
+
+def dataset_version_json(version: Any) -> dict[str, Any]:
+    return {
+        "id": version.id,
+        "dataset_id": version.dataset_id,
+        "schema": version.schema,
+        "row_count": version.row_count,
+        "classes": version.classes,
+        "source": version.source,
+        "ingestion_report": version.ingestion_report,
+        "artifact_hashes": version.artifact_hashes,
     }
 
 

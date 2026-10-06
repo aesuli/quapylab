@@ -52,6 +52,9 @@ def test_project_and_immutable_workflow_revision_round_trip(tmp_path: Path) -> N
     assert workflow_response.status_code == 201
     workflow_id = workflow_response.get_json()["id"]
     initial_revision_id = workflow_response.get_json()["draft_revision_id"]
+    assert client.get(f"/api/v1/projects/{project_id}/workflows").get_json()["items"] == [
+        workflow_response.get_json()
+    ]
     revision_response = client.post(
         f"/api/v1/workflows/{workflow_id}/revisions", json={"graph": graph("dataset-v2")}
     )
