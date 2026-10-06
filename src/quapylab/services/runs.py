@@ -129,6 +129,7 @@ class RunService:
         )
         if active_node is not None:
             active_node.state = "failed"
+            active_node.ended_at = datetime.now(UTC)
             active_node.error = {"message": message}
             active_node.logs = [
                 *active_node.logs,

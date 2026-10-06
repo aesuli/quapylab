@@ -3,12 +3,15 @@
 import argparse
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 from quapylab.app import create_app
-from quapylab.execution.local_worker import LocalWorker, unavailable_node_executor
+from quapylab.execution.local_worker import LocalWorker
+from quapylab.execution.runtime_adapters import RuntimeNodeExecutor
 from quapylab.nodes.registry import default_registry
 from quapylab.persistence.database import Database
 from quapylab.services.authentication import AuthenticationService
+from quapylab.services.artifacts import ArtifactService, LocalArtifactStore
 from quapylab.services.runs import RunService
 
 
@@ -34,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--database-url", required=True)
     worker.add_argument("--once", action="store_true", help="process at most one queued run")
     worker.add_argument("--poll-seconds", default=1.0, type=float)
+    worker.add_argument("--artifact-root", default=".quapylab/artifacts")
     return parser
 
 
@@ -64,7 +68,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError("--poll-seconds must be greater than zero.")
         database = Database(args.database_url)
         database.create_schema()
-        worker = LocalWorker(database, RunService(default_registry()), unavailable_node_executor)
+        artifacts = ArtifactService(LocalArtifactStore(Path(args.artifact_root)))
+        worker = LocalWorker(
+            database, RunService(default_registry()), RuntimeNodeExecutor(artifacts)
+        )
         recovered = worker.recover()
         if recovered:
             print(f"Marked {recovered} interrupted run(s).")

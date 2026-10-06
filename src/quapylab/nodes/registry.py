@@ -60,7 +60,17 @@ def default_registry() -> NodeRegistry:
     return NodeRegistry(
         (
             NodeDefinition(
-                "dataset", 1, "Dataset", "data", outputs=(PortDefinition("dataset", labelled),)
+                "dataset",
+                1,
+                "Dataset",
+                "data",
+                outputs=(PortDefinition("dataset", labelled),),
+                config_schema={
+                    "type": "object",
+                    "required": ["dataset_version_id"],
+                    "properties": {"dataset_version_id": {"type": "string", "format": "uuid"}},
+                    "additionalProperties": False,
+                },
             ),
             NodeDefinition(
                 "split",

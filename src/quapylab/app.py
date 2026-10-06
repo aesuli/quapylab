@@ -683,6 +683,8 @@ def artifact_json(artifact: Any) -> dict[str, Any]:
         "size_bytes": artifact.size_bytes,
         "sha256": artifact.sha256,
         "serialization": artifact.serialization,
+        "producing_run_id": artifact.producing_run_id,
+        "producing_node_run_id": artifact.producing_node_run_id,
     }
 
 

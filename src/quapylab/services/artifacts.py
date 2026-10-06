@@ -75,15 +75,24 @@ class ArtifactService:
         media_type: str,
         content: bytes,
         serialization: dict[str, object],
+        producing_run_id: str | None = None,
+        producing_node_run_id: str | None = None,
     ) -> Artifact:
         digest, storage_key = self._store.put(content)
         artifact = session.scalar(
             select(Artifact).where(Artifact.group_id == group_id, Artifact.sha256 == digest)
         )
         if artifact is not None:
+            # Content addressing intentionally reuses identical immutable bytes.  Preserve an
+            # existing producer, but backfill provenance for legacy/unattributed content.
+            if artifact.producing_run_id is None and producing_run_id is not None:
+                artifact.producing_run_id = producing_run_id
+                artifact.producing_node_run_id = producing_node_run_id
             return artifact
         artifact = Artifact(
             group_id=group_id,
+            producing_run_id=producing_run_id,
+            producing_node_run_id=producing_node_run_id,
             kind=kind,
             media_type=media_type,
             size_bytes=len(content),
@@ -94,6 +103,10 @@ class ArtifactService:
         session.add(artifact)
         session.flush()
         return artifact
+
+    def read_for_worker(self, artifact: Artifact) -> bytes:
+        """Read an already-authorized artifact and verify its immutable digest."""
+        return self._store.read(artifact.storage_key, artifact.sha256)
 
     def get(self, session: Session, *, actor: ActorContext, artifact_id: str) -> Artifact:
         artifact = session.get(Artifact, artifact_id)
