@@ -1,5 +1,6 @@
 from quapylab import __version__
 from quapylab.app import create_app
+from quapylab.config import DeploymentMode
 from quapylab.desktop import run_desktop
 
 
@@ -44,3 +45,35 @@ def test_unknown_api_route_is_not_rewritten_to_the_frontend() -> None:
 def test_desktop_smoke_path_does_not_open_a_window() -> None:
     assert run_desktop(smoke_test=True) == 0
 
+
+def test_desktop_mode_exposes_a_stable_implicit_actor() -> None:
+    application = create_app({"TESTING": True, "QUAPYLAB_MODE": "desktop"})
+
+    with application.test_request_context("/"):
+        application.preprocess_request()
+        from flask import g
+
+        assert g.actor.deployment_mode == "desktop"
+
+
+def test_node_types_are_published_by_the_server() -> None:
+    client = create_app({"TESTING": True}).test_client()
+
+    response = client.get("/api/v1/node-types")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["schema_version"] == 1
+    assert [item["type"] for item in body["items"]] == [
+        "acc",
+        "classifier",
+        "dataset",
+        "evaluation",
+        "split",
+    ]
+
+
+def test_web_mode_is_explicit() -> None:
+    application = create_app({"TESTING": True, "QUAPYLAB_MODE": "web"})
+
+    assert application.extensions["quapylab.config"].mode is DeploymentMode.WEB
