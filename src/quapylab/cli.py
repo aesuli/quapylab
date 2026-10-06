@@ -10,8 +10,8 @@ from quapylab.execution.local_worker import LocalWorker
 from quapylab.execution.runtime_adapters import RuntimeNodeExecutor
 from quapylab.nodes.registry import default_registry
 from quapylab.persistence.database import Database
-from quapylab.services.authentication import AuthenticationService
 from quapylab.services.artifacts import ArtifactService, LocalArtifactStore
+from quapylab.services.authentication import AuthenticationService
 from quapylab.services.runs import RunService
 
 

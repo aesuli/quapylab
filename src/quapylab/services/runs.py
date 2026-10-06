@@ -80,10 +80,26 @@ class RunService:
         self.get(session, actor=actor, run_id=run_id)
         return self.list_nodes_for_worker(session, run_id)
 
-    @staticmethod
-    def list_nodes_for_worker(session: Session, run_id: str) -> list[NodeRun]:
-        statement = select(NodeRun).where(NodeRun.run_id == run_id).order_by(NodeRun.id)
-        return list(session.scalars(statement))
+    def list_nodes_for_worker(self, session: Session, run_id: str) -> list[NodeRun]:
+        """Return nodes in the persisted workflow's deterministic execution order.
+
+        Node-run IDs are UUIDs and therefore cannot express dependency order.  Recompile the
+        immutable revision so a worker never runs a downstream node merely because its UUID
+        sorts first.
+        """
+        run = session.get(Run, run_id)
+        if run is None:
+            return []
+        revision = session.get(WorkflowRevision, run.workflow_revision_id)
+        if revision is None:
+            raise RuntimeError("Run references a missing workflow revision.")
+        workflow = WorkflowSpec.model_validate(revision.graph)
+        compilation = validate_workflow(workflow, self._registry)
+        nodes_by_id = {
+            node.node_id: node
+            for node in session.scalars(select(NodeRun).where(NodeRun.run_id == run_id))
+        }
+        return [nodes_by_id[node_id] for node_id in compilation.topological_order]
 
     def cancel(self, session: Session, *, actor: ActorContext, run_id: str) -> Run:
         run = self.get(session, actor=actor, run_id=run_id)

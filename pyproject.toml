@@ -42,7 +42,7 @@ where = ["src"]
 quapylab = ["py.typed", "static/**/*"]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = "-ra --basetemp=.pytest-tmp"
 testpaths = ["tests"]
 
 [tool.ruff]

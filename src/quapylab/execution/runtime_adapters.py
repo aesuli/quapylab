@@ -6,10 +6,13 @@ documents never influence imports, file paths, or executable code.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import pickle
 from collections.abc import Callable
 from datetime import UTC, datetime
+from inspect import signature
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -31,6 +34,8 @@ class RuntimeNodeExecutor:
         self._artifacts = artifacts
         self._adapters: dict[tuple[str, int], Adapter] = {
             ("dataset", 1): self._dataset,
+            ("split", 1): self._split,
+            ("classifier", 1): self._classifier,
             ("acc", 1): self._acc,
             ("evaluation", 1): self._evaluation,
         }
@@ -51,16 +56,51 @@ class RuntimeNodeExecutor:
         dataset = session.get(Dataset, version.dataset_id)
         if dataset is None or dataset.project_id != run.project_id:
             raise ValueError("Dataset configuration references a dataset outside this project.")
-        artifact = _trusted_materialization(session, run, version)
-        # Verify before deserializing, even though this node only passes the immutable input onward.
-        _load_pickle(self._artifacts, artifact)
-        node.output_artifact_ids = [artifact.id]
-        _log(
-            node,
-            "info",
-            "dataset.loaded",
-            "Loaded immutable trusted QuaPy materialization.",
+        artifact = _dataset_materialization(
+            session, run, node, version, self._artifacts, self._store_materialization
         )
+        node.output_artifact_ids = [artifact.id]
+        _log(node, "dataset.loaded", "Loaded immutable trusted QuaPy materialization.")
+
+    def _split(self, session: Session, run: Run, node: NodeRun) -> None:
+        data = self._dataset_from_previous_node(session, run)
+        # Built-in QuaPy datasets are already delivered as deterministic train/test splits.
+        if hasattr(data, "training") and hasattr(data, "test"):
+            split_data = data
+        else:
+            train_proportion = node.resolved_config.get("train_proportion", 0.7)
+            if not isinstance(train_proportion, (int, float)) or not 0 < train_proportion < 1:
+                raise ValueError("Split train_proportion must be strictly between zero and one.")
+            split_data = _split_collection(data, float(train_proportion), run.seed)
+        artifact = self._store_materialization(session, run, node, split_data)
+        node.output_artifact_ids = [artifact.id]
+        _log(node, "split.completed", "Created the deterministic training and evaluation split.")
+
+    def _classifier(self, session: Session, run: Run, node: NodeRun) -> None:
+        data = self._dataset_from_previous_node(session, run)
+        training = data.training if hasattr(data, "training") else data
+        try:
+            from sklearn.linear_model import LogisticRegression  # type: ignore[import-untyped]
+        except ImportError as error:  # pragma: no cover - QuaPy installation supplies scikit-learn
+            raise RuntimeError("scikit-learn is required to execute classifier nodes.") from error
+        max_iter = node.resolved_config.get("max_iter", 1000)
+        seed = node.resolved_config.get("seed", run.seed)
+        if not isinstance(max_iter, int) or max_iter < 1 or not isinstance(seed, int):
+            raise ValueError("Classifier max_iter and seed must be integers.")
+        classifier = LogisticRegression(max_iter=max_iter, random_state=seed)
+        classifier.fit(training.instances, training.labels)
+        artifact = self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="sklearn-classifier",
+            media_type="application/vnd.quapylab.sklearn-classifier+pickle",
+            content=pickle.dumps(classifier, protocol=pickle.HIGHEST_PROTOCOL),
+            serialization={"format": "pickle", "trusted_producer": "workflow-runtime"},
+        )
+        node.output_artifact_ids = [artifact.id]
+        _log(node, "classifier.fitted", "Fitted the configured logistic-regression classifier.")
 
     def _acc(self, session: Session, run: Run, node: NodeRun) -> None:
         data = self._dataset_from_previous_node(session, run)
@@ -69,7 +109,11 @@ class RuntimeNodeExecutor:
         except ImportError as error:  # pragma: no cover - deployment dependency failure
             raise RuntimeError("QuaPy is required to execute ACC nodes.") from error
         quantifier = ACC()
-        quantifier.fit(data.training)
+        training = data.training if hasattr(data, "training") else data
+        if len(signature(quantifier.fit).parameters) >= 2:
+            quantifier.fit(training.instances, training.labels)
+        else:  # Supports QuaPy-compatible adapters with a collection-oriented fit contract.
+            quantifier.fit(training)
         content = pickle.dumps(quantifier, protocol=pickle.HIGHEST_PROTOCOL)
         artifact = self._artifacts.create(
             session,
@@ -82,16 +126,18 @@ class RuntimeNodeExecutor:
             serialization={"format": "pickle", "trusted_producer": "workflow-runtime"},
         )
         node.output_artifact_ids = [artifact.id]
-        _log(node, "info", "acc.fitted", "Fitted ACC quantifier on the training split.")
+        _log(node, "acc.fitted", "Fitted ACC quantifier on the training split.")
 
     def _evaluation(self, session: Session, run: Run, node: NodeRun) -> None:
-        data = self._dataset_from_dataset_node(session, run)
+        data = self._dataset_from_previous_node(session, run)
         quantifier = self._quantifier_from_previous_node(session, run)
         estimated = [float(value) for value in quantifier.quantify(data.test.instances)]
         actual = [float(value) for value in data.test.prevalence()]
         if len(estimated) != len(actual):
             raise RuntimeError("Quantifier output does not match the dataset class cardinality.")
-        mae = sum(abs(left - right) for left, right in zip(estimated, actual, strict=True)) / len(actual)
+        mae = sum(
+            abs(left - right) for left, right in zip(estimated, actual, strict=True)
+        ) / len(actual)
         result = {
             "schema_version": 1,
             "metric": "mae",
@@ -112,24 +158,29 @@ class RuntimeNodeExecutor:
             serialization={"format": "json", "schema_version": 1},
         )
         node.output_artifact_ids = [artifact.id]
-        _log(node, "info", "evaluation.completed", "Computed normalized ACC evaluation result.")
+        _log(node, "evaluation.completed", "Computed normalized ACC evaluation result.")
 
     def _dataset_from_previous_node(self, session: Session, run: Run) -> Any:
+        split = _node(session, run, "split", required=False)
+        if split is not None and split.output_artifact_ids:
+            return _load_pickle(self._artifacts, _trusted_runtime_artifact(session, run, split))
         return self._dataset_from_dataset_node(session, run)
 
     def _dataset_from_dataset_node(self, session: Session, run: Run) -> Any:
         source = _node(session, run, "dataset")
+        assert source is not None
         version_id = _dataset_version_id(source.resolved_config)
         version = session.get(DatasetVersion, version_id)
         if version is None:
             raise RuntimeError("Dataset node references a missing dataset version.")
-        artifact = _trusted_materialization(session, run, version)
-        if source.output_artifact_ids != [artifact.id]:
+        artifact = _dataset_output_artifact(session, run, source)
+        if not source.output_artifact_ids or source.output_artifact_ids != [artifact.id]:
             raise RuntimeError("Dataset node output does not match its selected dataset version.")
         return _load_pickle(self._artifacts, artifact)
 
     def _quantifier_from_previous_node(self, session: Session, run: Run) -> Any:
         source = _node(session, run, "acc")
+        assert source is not None
         if len(source.output_artifact_ids) != 1:
             raise RuntimeError("ACC node did not produce a quantifier artifact.")
         artifact = session.get(Artifact, source.output_artifact_ids[0])
@@ -143,6 +194,20 @@ class RuntimeNodeExecutor:
         ):
             raise RuntimeError("ACC output is not a trusted QuaPy runtime artifact.")
         return _load_pickle(self._artifacts, artifact)
+
+    def _store_materialization(
+        self, session: Session, run: Run, node: NodeRun, data: Any
+    ) -> Artifact:
+        return self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="quapy-materialization",
+            media_type=_MATERIALIZATION_MEDIA_TYPE,
+            content=pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL),
+            serialization={"format": "pickle", "trusted_producer": "workflow-runtime"},
+        )
 
 
 def _dataset_version_id(config: dict[str, Any]) -> str:
@@ -158,16 +223,91 @@ def _trusted_materialization(session: Session, run: Run, version: DatasetVersion
     if not isinstance(artifact_id, str):
         raise ValueError("Dataset version has no QuaPy materialization artifact.")
     artifact = session.get(Artifact, artifact_id)
+    if artifact is None or artifact.group_id != _run_group_id(session, run):
+        raise ValueError("Dataset version does not reference a trusted QuaPy materialization.")
+    if artifact.sha256 not in version.artifact_hashes:
+        raise ValueError("Dataset version materialization does not match its recorded hash.")
+    is_quapy_materialization = (
+        artifact.kind == "quapy-materialization"
+        and artifact.media_type == _MATERIALIZATION_MEDIA_TYPE
+        and artifact.serialization == {"format": "pickle", "trusted_producer": "quapy-loader"}
+    )
+    is_tabular_source = (
+        artifact.kind == "dataset-source"
+        and artifact.media_type in {"text/csv", "text/tab-separated-values"}
+        and artifact.serialization.get("format") in {"csv", "tsv"}
+    )
+    if not (is_quapy_materialization or is_tabular_source):
+        raise ValueError("Dataset version does not reference a trusted runtime source.")
+    return artifact
+
+
+def _dataset_materialization(
+    session: Session,
+    run: Run,
+    node: NodeRun,
+    version: DatasetVersion,
+    artifacts: ArtifactService,
+    store_materialization: Callable[[Session, Run, NodeRun, Any], Artifact],
+) -> Artifact:
+    source = _trusted_materialization(session, run, version)
+    if source.kind == "quapy-materialization":
+        _load_pickle(artifacts, source)
+        return source
+    if source.kind != "dataset-source":
+        raise ValueError("Dataset version has an unsupported runtime source artifact.")
+    data = _csv_labelled_collection(artifacts.read_for_worker(source), version)
+    return store_materialization(session, run, node, data)
+
+
+def _dataset_output_artifact(session: Session, run: Run, node: NodeRun) -> Artifact:
+    if len(node.output_artifact_ids) != 1:
+        raise RuntimeError("Dataset node did not produce exactly one materialization artifact.")
+    artifact = session.get(Artifact, node.output_artifact_ids[0])
     if (
         artifact is None
         or artifact.group_id != _run_group_id(session, run)
-        or artifact.sha256 not in version.artifact_hashes
         or artifact.kind != "quapy-materialization"
         or artifact.media_type != _MATERIALIZATION_MEDIA_TYPE
-        or artifact.serialization != {"format": "pickle", "trusted_producer": "quapy-loader"}
+        or artifact.serialization
+        not in (
+            {"format": "pickle", "trusted_producer": "quapy-loader"},
+            {"format": "pickle", "trusted_producer": "workflow-runtime"},
+        )
     ):
-        raise ValueError("Dataset version does not reference a trusted QuaPy materialization.")
+        raise RuntimeError("Dataset node output is not a trusted materialization.")
     return artifact
+
+
+def _csv_labelled_collection(content: bytes, version: DatasetVersion) -> Any:
+    label_column = version.ingestion_report.get("label_column")
+    if not isinstance(label_column, str) or not label_column:
+        raise ValueError("A labelled CSV/TSV dataset requires a configured label column.")
+    filename = version.source.get("filename")
+    delimiter = "\t" if isinstance(filename, str) and filename.lower().endswith(".tsv") else ","
+    try:
+        rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig")), delimiter=delimiter))
+    except UnicodeDecodeError as error:
+        raise ValueError("Dataset source is not valid UTF-8.") from error
+    columns = [item["name"] for item in version.schema.get("columns", [])]
+    features = [column for column in columns if column != label_column]
+    if not features:
+        raise ValueError("A labelled dataset requires at least one feature column.")
+    try:
+        matrix = [[float(row[feature]) for feature in features] for row in rows]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "Initial CSV execution supports complete numeric feature columns only."
+        ) from error
+    labels = [row.get(label_column, "") for row in rows]
+    if not rows or any(not label for label in labels):
+        raise ValueError("Dataset labels must be present for every row.")
+    try:
+        import numpy as np
+        from quapy.data.base import LabelledCollection  # type: ignore[import-untyped]
+    except ImportError as error:  # pragma: no cover - supplied by the QuaPy installation
+        raise RuntimeError("QuaPy and NumPy are required to materialize a CSV dataset.") from error
+    return LabelledCollection(np.asarray(matrix), np.asarray(labels), classes=version.classes)
 
 
 def _load_pickle(artifacts: ArtifactService, artifact: Artifact) -> Any:
@@ -182,13 +322,39 @@ def _run_group_id(session: Session, run: Run) -> str:
     return project.group_id
 
 
-def _node(session: Session, run: Run, node_type: str) -> NodeRun:
+def _node(session: Session, run: Run, node_type: str, *, required: bool = True) -> NodeRun | None:
     node = session.scalar(
         select(NodeRun).where(NodeRun.run_id == run.id, NodeRun.node_type == node_type)
     )
-    if node is None:
+    if node is None and required:
         raise RuntimeError(f"Run is missing required {node_type!r} node output.")
     return node
+
+
+def _trusted_runtime_artifact(session: Session, run: Run, node: NodeRun) -> Artifact:
+    if len(node.output_artifact_ids) != 1:
+        raise RuntimeError(f"{node.node_type} did not produce a materialization artifact.")
+    artifact = session.get(Artifact, node.output_artifact_ids[0])
+    if (
+        artifact is None
+        or artifact.group_id != _run_group_id(session, run)
+        or artifact.kind != "quapy-materialization"
+        or artifact.media_type != _MATERIALIZATION_MEDIA_TYPE
+        or artifact.serialization != {"format": "pickle", "trusted_producer": "workflow-runtime"}
+    ):
+        raise RuntimeError(f"{node.node_type} output is not a trusted runtime materialization.")
+    return artifact
+
+
+def _split_collection(data: Any, train_proportion: float, seed: int) -> Any:
+    training, test = data.split_stratified(train_prop=train_proportion, random_state=seed)
+    return _DatasetSplit(training=training, test=test)
+
+
+class _DatasetSplit:
+    def __init__(self, *, training: Any, test: Any) -> None:
+        self.training = training
+        self.test = test
 
 
 def _log(node: NodeRun, event: str, message: str) -> None:

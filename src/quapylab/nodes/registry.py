@@ -79,6 +79,18 @@ def default_registry() -> NodeRegistry:
                 "data",
                 inputs=(PortDefinition("dataset", labelled),),
                 outputs=(PortDefinition("train", labelled),),
+                config_schema={
+                    "type": "object",
+                    "properties": {
+                        "train_proportion": {
+                            "type": "number",
+                            "minimum": 0.1,
+                            "maximum": 0.9,
+                            "default": 0.7,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
             ),
             NodeDefinition(
                 "classifier",
@@ -87,6 +99,14 @@ def default_registry() -> NodeRegistry:
                 "model",
                 inputs=(PortDefinition("train", labelled),),
                 outputs=(PortDefinition("classifier", "classifier"),),
+                config_schema={
+                    "type": "object",
+                    "properties": {
+                        "max_iter": {"type": "integer", "minimum": 1, "default": 1000},
+                        "seed": {"type": "integer"},
+                    },
+                    "additionalProperties": False,
+                },
             ),
             NodeDefinition(
                 "acc",
