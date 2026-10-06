@@ -17,6 +17,7 @@ import {
 type PortType = 'labelled_collection' | 'fitted_quantifier' | 'evaluation'
 
 type LabNodeData = {
+  kind: 'data source' | 'quantifier' | 'evaluation'
   title: string
   subtitle: string
   input?: PortType
@@ -29,6 +30,7 @@ const initialNodes: Node<LabNodeData>[] = [
     type: 'labNode',
     position: { x: 40, y: 130 },
     data: {
+      kind: 'data source',
       title: 'Dataset',
       subtitle: 'Labelled CSV',
       output: 'labelled_collection',
@@ -39,6 +41,7 @@ const initialNodes: Node<LabNodeData>[] = [
     type: 'labNode',
     position: { x: 340, y: 130 },
     data: {
+      kind: 'quantifier',
       title: 'ACC',
       subtitle: 'Adjusted Classify & Count',
       input: 'labelled_collection',
@@ -50,6 +53,7 @@ const initialNodes: Node<LabNodeData>[] = [
     type: 'labNode',
     position: { x: 640, y: 130 },
     data: {
+      kind: 'evaluation',
       title: 'Evaluation',
       subtitle: 'APP · MAE',
       input: 'fitted_quantifier',
@@ -73,6 +77,10 @@ const initialEdges: Edge[] = [
   },
 ]
 
+function portName(port: PortType): string {
+  return port.replace('_', ' ')
+}
+
 function LabNode({ data }: NodeProps<Node<LabNodeData>>) {
   return (
     <article className="lab-node">
@@ -84,9 +92,21 @@ function LabNode({ data }: NodeProps<Node<LabNodeData>>) {
           className={`port port-${data.input}`}
         />
       )}
-      <div className="lab-node__kind">{data.input ?? 'source'}</div>
+      <div className="lab-node__kind">{data.kind}</div>
       <strong>{data.title}</strong>
       <span>{data.subtitle}</span>
+      <footer className="lab-node__ports">
+        {data.input && (
+          <span>
+            <b>Input</b> {portName(data.input)}
+          </span>
+        )}
+        {data.output && (
+          <span>
+            <b>Output</b> {portName(data.output)}
+          </span>
+        )}
+      </footer>
       {data.output && (
         <Handle
           id="output"

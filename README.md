@@ -2,6 +2,8 @@
 
 QuaPy Lab is a local-first visual workbench for reproducible quantification experiments backed by [QuaPy](https://github.com/HLT-ISTI/QuaPy).
 
+It has two deployment modes: a passwordless personal desktop mode and an authenticated multi-user web mode where groups share projects through role-based permissions. The web identity/group layer is planned but not implemented in the current architecture spike.
+
 The project is in its architecture-validation phase. See [GOAL.md](GOAL.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the product boundary and roadmap.
 
 ## Development baseline

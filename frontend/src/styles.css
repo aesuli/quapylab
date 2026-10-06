@@ -86,6 +86,26 @@ body {
   font-size: 12px;
 }
 
+.lab-node__ports {
+  display: grid;
+  gap: 3px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #e2eae5;
+}
+
+.lab-node__ports span {
+  color: #40584c;
+  font-size: 10px;
+}
+
+.lab-node__ports b {
+  color: #318365;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .lab-node__kind {
   color: #318365;
   font-size: 9px;

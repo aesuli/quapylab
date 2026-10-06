@@ -23,13 +23,14 @@ Text, sparse, image, ordinal, confidence-region, and remote/distributed executio
 - Researchers comparing quantification methods under controlled protocols.
 - Data scientists fitting a quantifier and validating it on unlabelled batches before export.
 - Instructors and students learning quantification through inspectable workflows.
+- Research teams sharing datasets, workflows, runs, reports, and fitted models inside controlled groups.
 
 ### Product principles
 
 - Reproducible by default: inputs, package versions, seeds, resolved parameters, and artifacts belong to every run.
 - Safe visual composition: incompatible ports and invalid configurations are rejected before execution.
 - QuaPy-native semantics: preserve QuaPy concepts and outputs rather than inventing competing abstractions.
-- Local-first, server-capable: no external services are required for a single-user install, but storage and execution interfaces remain replaceable.
+- Mode-aware without divergent business logic: desktop uses an implicit local identity; web deployments authenticate multiple users and authorize access through groups.
 - Inspectable execution: a node exposes status, logs, duration, outputs, and failure details.
 - Immutable evidence: completed run inputs and results cannot silently change when a dataset or workflow is edited.
 
@@ -37,7 +38,9 @@ Text, sparse, image, ordinal, confidence-region, and remote/distributed executio
 
 ### MVP (first useful release)
 
-- Project and workflow create/open/rename/duplicate/delete.
+- Authenticated web accounts plus passwordless personal desktop mode.
+- Personal and shared groups with owner, administrator, editor, and viewer membership roles.
+- Group-owned project and workflow create/open/rename/duplicate/delete, member management, and project transfer between authorized groups.
 - Node canvas with palette, search, typed connectors, configuration forms, validation, undo/redo, auto-layout, zoom/minimap, and JSON import/export.
 - CSV/TSV import for dense tabular labelled and unlabelled datasets.
 - Dataset preview, inferred schema, explicit feature/label selection, class mapping, missing-value summary, and train/validation/test split.
@@ -61,8 +64,8 @@ Text, sparse, image, ordinal, confidence-region, and remote/distributed executio
 - LeQua datasets and sample-protocol imports.
 - Multiclass simplex visualization and confidence regions.
 - Image embeddings and QuaNet/PyTorch as optional extras.
-- PostgreSQL/object-storage adapters and a Redis-backed distributed worker.
-- Authentication, projects shared by multiple users, roles, and audit log.
+- Object-storage adapters and a Redis-backed distributed worker.
+- External identity-provider login through OpenID Connect, enterprise group synchronization, and fine-grained project exceptions beyond group membership.
 - Plugin SDK for third-party nodes and quantifiers.
 - Experiment templates, reusable subgraphs, parameter sweeps across workflows, and a CLI/headless runner.
 - A stable automation API for scripts and CI that covers the complete experiment lifecycle.
@@ -73,6 +76,7 @@ Text, sparse, image, ordinal, confidence-region, and remote/distributed executio
 - Arbitrary Python execution in graph nodes.
 - General-purpose ETL or a replacement for notebooks.
 - Real-time multi-user canvas collaboration.
+- Anonymous or public-link project sharing.
 - Continuous data ingestion, externally triggered jobs, and production serving.
 - A compatibility guarantee for the Lab's internal HTTP API to external clients.
 - In-browser execution of QuaPy.
@@ -86,13 +90,13 @@ Text, sparse, image, ordinal, confidence-region, and remote/distributed executio
 | --- | --- | --- |
 | Backend | Python 3.11+, Flask application factory | Native WSGI deployment, simple embedding in pywebview, mature request/file handling. |
 | API/schema | Flask + Pydantic v2 models | Explicit request, workflow, node, and artifact contracts; JSON Schema can drive UI forms. |
-| ORM/migrations | SQLAlchemy 2 + Alembic | SQLite locally, PostgreSQL later without changing repositories. |
+| ORM/migrations | SQLAlchemy 2 + Alembic | SQLite for desktop/development; PostgreSQL is required for supported multi-user web deployments. |
 | Frontend | React + TypeScript + Vite | Strong ecosystem and a static production bundle served by Flask. |
 | Graph editor | `@xyflow/react` (React Flow) | MIT licensed; custom nodes, handles, pan/zoom, selection, minimap, and controls are already provided. |
 | Forms/state | React Hook Form + generated JSON Schema metadata; Zustand for editor state | Keeps node definitions server-owned while retaining responsive canvas state. |
 | Tables/charts | TanStack Table + Plotly.js | Interactive comparison tables and exportable scientific charts. QuaPy/Matplotlib images can also be retained as artifacts. |
 | Execution | Local process workers behind a `RunBackend` interface | ML tasks are CPU-heavy and must not run in WSGI request threads; process isolation enables cancellation and contains crashes. |
-| Metadata | SQLite by default | Zero-service standalone installation. Enable WAL, foreign keys, busy timeout, and short transactions. |
+| Metadata | SQLite in desktop mode; PostgreSQL in web mode | Zero-service personal desktop operation while retaining concurrency, locking, and operational safety for multiple web users/workers. |
 | Artifacts | Content-addressed files under an application data directory | Avoids putting datasets/models in SQLite and permits deduplication/integrity checking. |
 | Serialization | JSON for specs/results, Parquet/NPZ for data, joblib for trusted local models | Match each artifact to its data shape; record formats and hashes. Never load untrusted joblib files. |
 | Desktop | pywebview pointing at the same local Flask app | Native window without a separate desktop implementation; use the Windows WebView2 backend and a documented GTK/WebKit or Qt backend on Linux. |
@@ -103,7 +107,14 @@ Flask is preferred over an ASGI-first framework because WSGI is an explicit requ
 
 ### Product and API boundaries
 
-QuaPy Lab has an internal HTTP API because its React UI and Python backend are separate layers. That API is comprehensive but application-private in the MVP: it is free to evolve with the frontend and does not initially promise remote authentication, rate limits, idempotent commands, or long-term client compatibility.
+QuaPy Lab has an internal HTTP API because its React UI and Python backend are separate layers. That API is comprehensive but application-private in the MVP: web-session authentication and authorization are required, but the API does not promise token authentication for external clients, rate limits for public integrations, idempotent remote commands, or long-term client compatibility.
+
+The application has two explicit identity modes:
+
+- **Desktop mode:** creates or reuses one implicit local user and private group. No login screen or group administration is shown. It binds only to loopback and uses a per-launch secret to prevent unrelated local pages from invoking the API.
+- **Web mode:** requires authentication for every non-health application route. Accounts are initially local and administrator-created; passwords are hashed with Argon2id. Browser authentication uses server-side sessions in secure, HTTP-only, SameSite cookies with CSRF protection. OpenID Connect is a later `AuthBackend`, not a prerequisite for the first release.
+
+Domain services always receive an `ActorContext` containing the user, active group, deployment mode, and system privileges. Authorization is enforced in services and repositories before resource lookup or mutation; frontend visibility is never the security boundary.
 
 Two later interfaces must remain distinct:
 
@@ -169,7 +180,13 @@ packaging/
 
 ### Persistent entities
 
-- `Project`: name, description, settings, timestamps.
+- `User`: login identity, display name, status, system-administrator flag, and timestamps.
+- `LocalCredential`: user, Argon2id password hash and parameters, password-change requirement, and rotation timestamps.
+- `Group`: project-sharing boundary, name, slug, type (`personal` or `shared`), and timestamps.
+- `GroupMembership`: user, group, role (`owner`, `administrator`, `editor`, or `viewer`), inviter, and timestamps.
+- `WebSession`: opaque server-side session identifier, user, expiry, last activity, and revocation metadata.
+- `AuditEvent`: actor, group, project/resource reference, action, outcome, request id, timestamp, and safe structured details.
+- `Project`: owning group, name, description, settings, timestamps.
 - `Workflow`: project, name, mutable draft revision pointer.
 - `WorkflowRevision`: immutable graph JSON, schema version, content hash, creation metadata.
 - `Dataset`: logical identity, name, label status, current version.
@@ -179,7 +196,27 @@ packaging/
 - `Artifact`: kind, media type, size, SHA-256, storage key, producing run/node, serialization metadata.
 - `Model`: friendly name, producing run, QuaPy/node definition versions, trusted model artifact, input signature, classes.
 
-Use UUIDs at boundaries, UTC timestamps in storage, and optimistic revision/version fields on mutable records.
+Use UUIDs at boundaries, UTC timestamps in storage, and optimistic revision/version fields on mutable records. Every project-scoped entity is reachable through an owning project/group; global artifact deduplication must never reveal another group's artifact existence or grant access across groups.
+
+### Authentication and authorization
+
+Every user receives a personal group on creation and may belong to shared groups. Projects belong to exactly one group, making the group the default sharing and retention boundary.
+
+| Role | Capabilities within the group |
+| --- | --- |
+| Owner | All administrator capabilities; transfer or delete the group and assign ownership. At least one owner must remain. |
+| Administrator | Invite, remove, and change non-owner members; create, transfer-in, archive, and delete projects; manage group settings. |
+| Editor | Create projects; read and modify project datasets/workflows; run experiments; create reports/models; export allowed artifacts. |
+| Viewer | Read projects, run history, reports, and permitted artifact downloads; cannot mutate or start/cancel runs. |
+
+System administrators manage accounts and deployment policy but do not silently acquire access to project contents; any support access must be explicit and audited. Project transfer requires authorization in both source and destination groups. Membership removal immediately blocks new access and revokes active sessions when an account is disabled; already running jobs retain their recorded initiating actor but output remains owned by the project group.
+
+Initial web-account lifecycle:
+
+1. A one-time CLI command bootstraps the first system administrator.
+2. System administrators create/disable accounts; group owners/administrators manage group membership.
+3. Users change their own passwords; forgotten-password recovery is administrator-mediated until an email or OIDC backend exists.
+4. Login, logout, password change, membership/role changes, project transfers/deletions, model export, and authorization failures create audit events without recording secrets or raw data.
 
 ### Workflow document
 
@@ -310,7 +347,9 @@ The React frontend uses this complete internal API. Versioning its route prefix 
 | Area | Representative endpoints |
 | --- | --- |
 | System | `GET /health/live`, `GET /health/ready`, `GET /version`, `GET /node-types` |
-| Projects | `GET/POST /projects`, `GET/PATCH/DELETE /projects/{id}` |
+| Authentication | `POST /auth/login`, `POST /auth/logout`, `GET /auth/session`, `POST /auth/change-password` |
+| Groups | `GET/POST /groups`, `GET/PATCH /groups/{id}`, `GET/POST /groups/{id}/members`, `PATCH/DELETE /groups/{id}/members/{user_id}` |
+| Projects | `GET/POST /groups/{group_id}/projects`, `GET/PATCH/DELETE /projects/{id}`, `POST /projects/{id}/transfer` |
 | Workflows | `GET/POST /workflows`, `GET/PATCH /workflows/{id}`, `POST /workflows/{id}/revisions`, `POST /workflows/{id}/validate` |
 | Datasets | `GET/POST /datasets`, `GET /datasets/{id}`, `GET /dataset-versions/{id}/preview` |
 | Runs | `POST /runs`, `GET /runs/{id}`, `POST /runs/{id}/cancel`, `GET /runs/{id}/nodes`, `GET /runs/{id}/logs` |
@@ -319,11 +358,11 @@ The React frontend uses this complete internal API. Versioning its route prefix 
 
 Use multipart upload for files and JSON for metadata. Limit preview/result pagination. Set `Content-Disposition` safely on downloads and never accept a client-controlled filesystem path.
 
-Standalone mode binds to `127.0.0.1` by default. Any non-loopback or multi-user deployment needs an explicit flag and an authentication design; it is not part of the MVP support contract. Native mode must use an unguessable per-launch secret between the embedded UI and local server so unrelated local pages cannot invoke privileged Lab operations.
+Standalone/desktop mode binds to `127.0.0.1` by default and uses an implicit local actor plus an unguessable per-launch secret between the embedded UI and local server. Web mode refuses to start without a persistent secret, PostgreSQL, an initialized administrator, trusted proxy/host configuration, and secure-cookie/TLS settings appropriate to its public URL. Mode is explicit startup configuration and cannot be selected from an HTTP request.
 
 ## 7. Delivery plan
 
-Estimates assume one experienced full-time developer and include implementation plus automated tests, not long research pauses. Re-estimate after Phase 1. A credible Lab MVP is approximately 13–17 weeks; the automation API and QuaPy Model Server are separate follow-on projects.
+Estimates assume one experienced full-time developer and include implementation plus automated tests, not long research pauses. Re-estimate after Phase 1. With web authentication and group sharing included, a credible Lab MVP is approximately 16–21 weeks; the automation API and QuaPy Model Server are separate follow-on projects.
 
 ### Phase 0 — decisions and spikes (1 week)
 
@@ -336,16 +375,19 @@ Estimates assume one experienced full-time developer and include implementation 
 
 Exit: each risky integration has a runnable spike and the version matrix/build targets are agreed.
 
-### Phase 1 — foundation and contracts (2 weeks)
+### Phase 1 — foundation, identity, and contracts (3–4 weeks)
 
 - Create Python/frontend packages, CI, lint/type/test commands, app factory, configuration profiles, and structured logging.
 - Run backend and frontend checks in a Windows and Linux CI matrix from the start, even before native packaging is introduced.
 - Define Pydantic workflow/node/artifact schemas and JSON error envelope.
 - Implement registry skeleton, graph validation/topological compilation, and schema-version migration hooks.
-- Add SQLAlchemy entities, Alembic baseline, repositories, local artifact store, and transactional service tests.
+- Add SQLAlchemy entities, Alembic baseline, repositories, local artifact store, and transactional service tests for both SQLite and PostgreSQL.
+- Implement explicit desktop/web modes, `ActorContext`, local accounts with Argon2id, server-side sessions, CSRF protection, login throttling, administrator bootstrap CLI, groups, memberships, roles, and audit events.
+- Apply group scoping and role checks in services/repositories and test horizontal-access attempts, disabled accounts, membership changes, project transfer, and last-owner invariants.
+- Build login, account, active-group switcher, group membership, and permission-aware project UI; desktop mode hides these controls while using its implicit personal group.
 - Generate a typed frontend API client from the published OpenAPI document or a checked contract.
 
-Exit: an API-created workflow revision survives restart, validates, and round-trips without information loss.
+Exit: desktop mode creates a usable implicit personal workspace without login; in web mode two authenticated users can share a group project according to their roles, cannot access projects outside their groups, and an API-created workflow revision survives restart and round-trips without information loss.
 
 ### Phase 2 — dataset vertical slice (2 weeks)
 
@@ -410,17 +452,18 @@ Exit: source install, localhost server, WSGI deployment, and checksummed Windows
 - Unit: graph/type validation, schema inference, state transitions, cache keys, registry factories, metrics normalization.
 - Property: arbitrary DAGs never bypass cycle/type checks; prevalence vectors remain finite, non-negative, and sum to one within tolerance.
 - Contract: frontend/backend JSON schemas and API error shapes.
+- Authorization matrix: exercise every protected operation for anonymous, disabled, viewer, editor, administrator, owner, and system-administrator actors.
 - Integration: database + artifact store + worker + small QuaPy datasets; process cancellation and restart recovery.
 - Golden/reference: compare QuaPy Lab outputs with small direct QuaPy scripts under pinned versions and seeds.
 - UI: editor interactions, validation, progress polling, report rendering, accessibility keyboard path.
 - Packaging: launch frozen executable in a clean VM, complete sample workflow, restart, and reload artifacts.
 - Platform matrix: run core, integration, frontend, WSGI, filesystem/path, multiprocessing, and packaged smoke tests on both Windows and Linux.
 - Performance: upload, graph compilation, UI with 100–200 nodes, result tables, worker memory, and concurrent-run limits.
-- Security: malicious filenames/archives, oversized uploads, MIME mismatch, formula injection in CSV export, cross-origin/loopback request protection, CSRF if cookies are later introduced, and rejection of untrusted serialized models.
+- Security: credential/session handling, login throttling, CSRF, session fixation/revocation, horizontal and vertical privilege escalation, group/artifact isolation, malicious filenames/archives, oversized uploads, MIME mismatch, formula injection in CSV export, cross-origin/loopback request protection, and rejection of untrusted serialized models.
 
 ### MVP acceptance scenarios
 
-1. On a clean machine, launch the standalone server and finish the bundled binary demo workflow without writing code.
+1. On a clean machine, launch desktop mode without a login prompt and finish the bundled binary demo workflow inside its implicit personal group.
 2. Import the same CSV and seed twice; splits and metrics are identical within documented numerical tolerance.
 3. Connect incompatible ports or create a cycle; both UI and API reject the graph with node/edge-specific errors.
 4. Run ACC, PACC, and EMQ on the same APP samples; compare metrics and timing and export the underlying per-sample data.
@@ -430,6 +473,8 @@ Exit: source install, localhost server, WSGI deployment, and checksummed Windows
 8. Run behind a WSGI server with a non-root URL prefix and with no dependency on WebSockets.
 9. Launch the packaged native app; it uses a protected private loopback server, opens one native window, and shuts down its child process cleanly.
 10. Repeat the standalone, WSGI, worker-process, artifact-path, and native-package smoke workflows on both Windows and Linux.
+11. In web mode, verify that an owner can create a group, add an editor and viewer, and share a project; the editor can modify/run it, the viewer can only read it, and an unrelated authenticated user receives the same non-disclosing denial as for an unknown resource.
+12. Disable a web account or remove a membership and verify that access is revoked, sessions are invalidated as required, running-job provenance remains intact, and security-relevant actions appear in the audit trail.
 
 ## 9. Operational and security requirements
 
@@ -442,6 +487,8 @@ Exit: source install, localhost server, WSGI deployment, and checksummed Windows
 - Pin dependency ranges and record the exact resolved environment in each run. QuaPy adapter compatibility tests gate upgrades.
 - Serve immutable hashed frontend assets with a strict Content Security Policy. Reject arbitrary node imports and executable expressions. Protect the native loopback API with a per-launch secret.
 - Treat uploaded data as sensitive and local by default; no telemetry unless explicitly opt-in.
+- Scope every query, cache lookup, artifact download, log stream, and background-job action to an authorized actor and group. Never trust a group or user id supplied by the client without checking membership.
+- In web mode, require TLS at the deployment boundary, secure session cookies, CSRF protection, login throttling, password-strength policy, Argon2id hashes, secret rotation procedures, and auditable account administration.
 
 ## 10. Main risks and mitigations
 
@@ -450,7 +497,10 @@ Exit: source install, localhost server, WSGI deployment, and checksummed Windows
 | QuaPy methods have heterogeneous requirements and optional dependencies. | Explicit capability-rich registry; phased method coverage; extras; compatibility tests against a pinned QuaPy range. |
 | Single-file bundles become large or miss dynamic/native dependencies. | Phase-0 spike, maintained PyInstaller hooks/spec, target-OS builds, clean-VM smoke tests; retain `onedir` as a supported fallback if one-file reliability is inadequate. |
 | Long tasks block or outlive WSGI requests. | Separate worker processes, persistent state/heartbeats, polling, cancellation, and startup reconciliation. |
-| SQLite contention with web and worker processes. | WAL, short transactions, one local worker by default, retry/busy timeout; documented PostgreSQL path for server/multi-worker use. |
+| SQLite contention or locking assumptions leak into collaborative deployment. | Confine SQLite to desktop/development mode; require PostgreSQL and transactional concurrency tests for supported multi-user web deployments. |
+| A missing authorization check exposes another group's datasets, artifacts, logs, or models. | Central `ActorContext`, deny-by-default service/repository policies, group-scoped queries, opaque identifiers, uniform not-found responses, and exhaustive authorization-matrix tests. |
+| Desktop and web modes drift into separate products. | Use the same entities and application services; desktop injects an implicit local actor/group, while only authentication and administration presentation differ. |
+| Password/session handling creates avoidable security risk. | Argon2id, server-side revocable sessions, secure cookie/CSRF defaults, login throttling, administrator-mediated recovery initially, audit events, and an `AuthBackend` boundary for later OIDC. |
 | Dataset mutation breaks reproducibility. | Immutable dataset versions and run binding; "latest" resolved at enqueue time and stored. |
 | Pickle/joblib permits code execution. | Load only worker-produced hashed artifacts; never accept serialized model uploads; a future Model Server accepts only approved, integrity-checked Lab bundles through an administrative deployment path. |
 | Lab endpoints accidentally become an unsupported production API. | Document them as internal, bind locally by default, and design the later automation API and Model Server as explicit, separately versioned contracts. |
@@ -463,7 +513,7 @@ Exit: source install, localhost server, WSGI deployment, and checksummed Windows
 
 Recommended defaults are shown first; these are product choices rather than blockers for Phase 0/1.
 
-1. Primary deployment: local single-user first; add authenticated multi-user server semantics later.
+1. Deployment modes: passwordless single-user desktop and authenticated multi-user web are both MVP requirements; PostgreSQL is required for supported web deployment.
 2. Platform order: implement and validate on Windows first, but require Linux source, WSGI, worker, and native-package tests before the MVP release; macOS may follow later.
 3. Initial data scope: dense CSV/TSV tabular data; text/sparse support immediately after MVP.
 4. Frontend: React/TypeScript with React Flow; accept a Node.js build-time toolchain while keeping the runtime application Python-hosted.
@@ -490,14 +540,17 @@ These are the first independently reviewable changes after the Phase-0 spikes:
 
 1. Initialize `pyproject.toml`, source package, frontend workspace, and unified developer commands.
 2. Add `create_app`, `/health/live`, `/version`, configuration tests, and frontend static fallback.
-3. Define the versioned workflow schema and five minimal node definitions: dataset, split, classifier, ACC, evaluation.
-4. Implement registry discovery without arbitrary imports and return definitions through `/api/v1/node-types`.
-5. Implement server graph validation/topological sorting with detailed errors and property tests.
-6. Add SQLAlchemy/Alembic project, workflow, revision, run, node-run, and artifact tables.
-7. Add atomic content-addressed local artifact storage with hash verification.
-8. Build the React Flow shell, palette, inspector, save/reload, and validation display.
-9. Implement CSV ingestion/versioning and the small deterministic dataset fixture.
-10. Implement the local process worker and the minimal QuaPy reference workflow.
+3. Add explicit desktop/web configuration and an `ActorContext`; bootstrap the implicit desktop user and personal group.
+4. Add SQLAlchemy/Alembic user, credential, group, membership, session, audit, project, workflow, revision, run, node-run, and artifact tables, exercising SQLite and PostgreSQL.
+5. Implement local web authentication, administrator bootstrap, session/CSRF handling, group roles, centralized authorization policies, and their security matrix tests.
+6. Build login, active-group, membership, and permission-aware project screens, hidden appropriately in desktop mode.
+7. Define the versioned workflow schema and five minimal node definitions: dataset, split, classifier, ACC, evaluation.
+8. Implement registry discovery without arbitrary imports and return definitions through `/api/v1/node-types`.
+9. Implement server graph validation/topological sorting with detailed errors and property tests.
+10. Add atomic content-addressed local artifact storage with hash verification and group-scoped authorization metadata.
+11. Build the React Flow shell, palette, inspector, save/reload, and validation display.
+12. Implement CSV ingestion/versioning and the small deterministic dataset fixture.
+13. Implement the local process worker and the minimal QuaPy reference workflow with initiating-actor provenance.
 
 ## 14. Research basis
 
