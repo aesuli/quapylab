@@ -95,6 +95,19 @@ body {
   border-top: 1px solid #e2eae5;
 }
 
+.lab-node__port {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  min-height: 24px;
+  align-items: center;
+}
+
+.lab-node__port--output { text-align: right; }
+.lab-node__port b { grid-row: 2; font-size: 8px; }
+.lab-node__port--output b { grid-column: 2; }
+
 .lab-node__ports span {
   color: #40584c;
   font-size: 10px;
@@ -132,6 +145,9 @@ body {
 .port-evaluation {
   background: #dd7b2e;
 }
+
+.port-classifier-spec { background: #bd5b83; }
+.port-evaluation-report { background: #dd7b2e; }
 
 button, input, select { font: inherit; }
 button { cursor: pointer; border: 0; border-radius: 6px; padding: 8px 11px; color: #fff; background: #247257; }

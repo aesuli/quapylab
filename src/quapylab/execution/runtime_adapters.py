@@ -50,7 +50,7 @@ class RuntimeNodeExecutor:
         adapter(session, run, node)
 
     def _dataset(self, session: Session, run: Run, node: NodeRun) -> None:
-        config = _dataset_config(node.resolved_config)
+        config = _dataset_config(_config(node))
         version = session.get(DatasetVersion, config.version_id)
         if version is None:
             raise ValueError("Dataset configuration references an unknown dataset version.")
@@ -64,53 +64,56 @@ class RuntimeNodeExecutor:
         _log(node, "dataset.loaded", "Loaded immutable trusted QuaPy materialization.")
 
     def _split(self, session: Session, run: Run, node: NodeRun) -> None:
-        data = self._dataset_from_previous_node(session, run)
+        data = self._collection_input(session, run, node, "dataset")
         # Built-in QuaPy datasets are already delivered as deterministic train/test splits.
         if hasattr(data, "training") and hasattr(data, "test"):
             split_data = data
         else:
-            train_proportion = node.resolved_config.get("train_proportion", 0.7)
+            train_proportion = _config(node).get("train_proportion", 0.7)
             if not isinstance(train_proportion, (int, float)) or not 0 < train_proportion < 1:
                 raise ValueError("Split train_proportion must be strictly between zero and one.")
             split_data = _split_collection(data, float(train_proportion), run.seed)
-        artifact = self._store_materialization(session, run, node, split_data)
-        node.output_artifact_ids = [artifact.id]
+        train = self._store_materialization(session, run, node, split_data.training)
+        test = self._store_materialization(session, run, node, split_data.test)
+        node.output_artifact_ids = [train.id, test.id]
         _log(node, "split.completed", "Created the deterministic training and evaluation split.")
 
     def _classifier(self, session: Session, run: Run, node: NodeRun) -> None:
-        data = self._dataset_from_previous_node(session, run)
-        training = data.training if hasattr(data, "training") else data
-        try:
-            from sklearn.linear_model import LogisticRegression  # type: ignore[import-untyped]
-        except ImportError as error:  # pragma: no cover - QuaPy installation supplies scikit-learn
-            raise RuntimeError("scikit-learn is required to execute classifier nodes.") from error
-        max_iter = node.resolved_config.get("max_iter", 1000)
-        seed = node.resolved_config.get("seed", run.seed)
+        max_iter = _config(node).get("max_iter", 1000)
+        seed = _config(node).get("seed", run.seed)
         if not isinstance(max_iter, int) or max_iter < 1 or not isinstance(seed, int):
             raise ValueError("Classifier max_iter and seed must be integers.")
-        classifier = LogisticRegression(max_iter=max_iter, random_state=seed)
-        classifier.fit(training.instances, training.labels)
+        content = json.dumps(
+            {"kind": "logistic_regression", "max_iter": max_iter, "seed": seed},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         artifact = self._artifacts.create(
             session,
             group_id=_run_group_id(session, run),
             producing_run_id=run.id,
             producing_node_run_id=node.id,
-            kind="sklearn-classifier",
-            media_type="application/vnd.quapylab.sklearn-classifier+pickle",
-            content=pickle.dumps(classifier, protocol=pickle.HIGHEST_PROTOCOL),
-            serialization={"format": "pickle", "trusted_producer": "workflow-runtime"},
+            kind="classifier-spec",
+            media_type="application/vnd.quapylab.classifier-spec+json",
+            content=content,
+            serialization={"format": "json", "schema_version": 1},
         )
         node.output_artifact_ids = [artifact.id]
-        _log(node, "classifier.fitted", "Fitted the configured logistic-regression classifier.")
+        _log(node, "classifier.resolved", "Resolved the configured logistic-regression classifier.")
 
     def _acc(self, session: Session, run: Run, node: NodeRun) -> None:
-        data = self._dataset_from_previous_node(session, run)
+        training = self._collection_input(session, run, node, "train")
+        classifier_spec = self._classifier_spec_input(session, run, node)
+        classifier = _classifier_from_spec(classifier_spec)
         try:
             from quapy.method.aggregative import ACC  # type: ignore[import-untyped]
         except ImportError as error:  # pragma: no cover - deployment dependency failure
             raise RuntimeError("QuaPy is required to execute ACC nodes.") from error
-        quantifier = ACC()
-        training = data.training if hasattr(data, "training") else data
+        try:
+            quantifier = ACC(classifier)
+        except TypeError:  # pragma: no cover - accommodates a QuaPy-compatible adapter surface
+            quantifier = ACC()
+            quantifier.classifier = classifier
         if len(signature(quantifier.fit).parameters) >= 2:
             quantifier.fit(training.instances, training.labels)
         else:  # Supports QuaPy-compatible adapters with a collection-oriented fit contract.
@@ -130,10 +133,10 @@ class RuntimeNodeExecutor:
         _log(node, "acc.fitted", "Fitted ACC quantifier on the training split.")
 
     def _evaluation(self, session: Session, run: Run, node: NodeRun) -> None:
-        data = self._dataset_from_previous_node(session, run)
-        quantifier = self._quantifier_from_previous_node(session, run)
-        estimated = [float(value) for value in quantifier.quantify(data.test.instances)]
-        actual = [float(value) for value in data.test.prevalence()]
+        test = self._collection_input(session, run, node, "test")
+        quantifier = self._quantifier_input(session, run, node)
+        estimated = [float(value) for value in quantifier.quantify(test.instances)]
+        actual = [float(value) for value in test.prevalence()]
         if len(estimated) != len(actual):
             raise RuntimeError("Quantifier output does not match the dataset class cardinality.")
         mae = sum(
@@ -145,7 +148,7 @@ class RuntimeNodeExecutor:
             "value": mae,
             "estimated_prevalence": estimated,
             "true_prevalence": actual,
-            "classes": [str(value) for value in data.test.classes_],
+            "classes": [str(value) for value in test.classes_],
         }
         content = json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
         artifact = self._artifacts.create(
@@ -161,39 +164,42 @@ class RuntimeNodeExecutor:
         node.output_artifact_ids = [artifact.id]
         _log(node, "evaluation.completed", "Computed normalized ACC evaluation result.")
 
-    def _dataset_from_previous_node(self, session: Session, run: Run) -> Any:
-        split = _node(session, run, "split", required=False)
-        if split is not None and split.output_artifact_ids:
-            return _load_pickle(self._artifacts, _trusted_runtime_artifact(session, run, split))
-        return self._dataset_from_dataset_node(session, run)
-
-    def _dataset_from_dataset_node(self, session: Session, run: Run) -> Any:
-        source = _node(session, run, "dataset")
-        assert source is not None
-        config = _dataset_config(source.resolved_config)
-        version = session.get(DatasetVersion, config.version_id)
-        if version is None:
-            raise RuntimeError("Dataset node references a missing dataset version.")
-        artifact = _dataset_output_artifact(session, run, source)
-        if not source.output_artifact_ids or source.output_artifact_ids != [artifact.id]:
-            raise RuntimeError("Dataset node output does not match its selected dataset version.")
+    def _collection_input(self, session: Session, run: Run, node: NodeRun, port: str) -> Any:
+        artifact = _input_artifact(session, run, node, port)
+        if (
+            artifact.kind != "quapy-materialization"
+            or artifact.media_type != _MATERIALIZATION_MEDIA_TYPE
+            or artifact.serialization
+            not in (
+                {"format": "pickle", "trusted_producer": "quapy-loader"},
+                {"format": "pickle", "trusted_producer": "workflow-runtime"},
+            )
+        ):
+            raise RuntimeError(f"Input {port!r} is not a trusted labelled collection.")
         return _load_pickle(self._artifacts, artifact)
 
-    def _quantifier_from_previous_node(self, session: Session, run: Run) -> Any:
-        source = _node(session, run, "acc")
-        assert source is not None
-        if len(source.output_artifact_ids) != 1:
-            raise RuntimeError("ACC node did not produce a quantifier artifact.")
-        artifact = session.get(Artifact, source.output_artifact_ids[0])
+    def _classifier_spec_input(self, session: Session, run: Run, node: NodeRun) -> dict[str, Any]:
+        artifact = _input_artifact(session, run, node, "classifier")
         if (
-            artifact is None
-            or artifact.group_id != _run_group_id(session, run)
-            or artifact.kind != "quapy-quantifier"
+            artifact.kind != "classifier-spec"
+            or artifact.media_type != "application/vnd.quapylab.classifier-spec+json"
+            or artifact.serialization != {"format": "json", "schema_version": 1}
+        ):
+            raise RuntimeError("Classifier input is not a trusted classifier specification.")
+        result = json.loads(self._artifacts.read_for_worker(artifact))
+        if not isinstance(result, dict):
+            raise RuntimeError("Classifier specification is malformed.")
+        return result
+
+    def _quantifier_input(self, session: Session, run: Run, node: NodeRun) -> Any:
+        artifact = _input_artifact(session, run, node, "quantifier")
+        if (
+            artifact.kind != "quapy-quantifier"
             or artifact.media_type != _QUANTIFIER_MEDIA_TYPE
             or artifact.serialization
             != {"format": "pickle", "trusted_producer": "workflow-runtime"}
         ):
-            raise RuntimeError("ACC output is not a trusted QuaPy runtime artifact.")
+            raise RuntimeError("Quantifier input is not a trusted QuaPy runtime artifact.")
         return _load_pickle(self._artifacts, artifact)
 
     def _store_materialization(
@@ -375,6 +381,51 @@ def _csv_labelled_collection(content: bytes, version: DatasetVersion, config: Da
 def _load_pickle(artifacts: ArtifactService, artifact: Artifact) -> Any:
     # read_for_worker verifies SHA-256 immediately before the only deserialization step.
     return pickle.loads(artifacts.read_for_worker(artifact))
+
+
+def _config(node: NodeRun) -> dict[str, Any]:
+    """Return public node configuration, excluding compiler-owned plan metadata."""
+    return {key: value for key, value in node.resolved_config.items() if not key.startswith("__")}
+
+
+def _input_artifact(session: Session, run: Run, node: NodeRun, port: str) -> Artifact:
+    bindings = node.resolved_config.get("__inputs")
+    if not isinstance(bindings, dict):
+        raise RuntimeError(f"{node.node_type} execution plan has no input bindings.")
+    binding = bindings.get(port)
+    if not isinstance(binding, dict):
+        raise RuntimeError(f"{node.node_type} is missing an input binding for {port!r}.")
+    source_id, source_port = binding.get("node_id"), binding.get("port")
+    if not isinstance(source_id, str) or not isinstance(source_port, str):
+        raise RuntimeError(f"{node.node_type} has a malformed input binding for {port!r}.")
+    source = session.scalar(
+        select(NodeRun).where(NodeRun.run_id == run.id, NodeRun.node_id == source_id)
+    )
+    if source is None:
+        raise RuntimeError(f"Input {port!r} references a missing node run.")
+    output_ports = source.resolved_config.get("__outputs")
+    if not isinstance(output_ports, list) or source_port not in output_ports:
+        raise RuntimeError(f"Input {port!r} references an unknown source output.")
+    index = output_ports.index(source_port)
+    if index >= len(source.output_artifact_ids):
+        raise RuntimeError(f"Source output for {port!r} was not produced.")
+    artifact = session.get(Artifact, source.output_artifact_ids[index])
+    if artifact is None or artifact.group_id != _run_group_id(session, run):
+        raise RuntimeError(f"Input {port!r} does not reference an accessible artifact.")
+    return artifact
+
+
+def _classifier_from_spec(spec: dict[str, Any]) -> Any:
+    if spec.get("kind") != "logistic_regression":
+        raise ValueError("Classifier specification is unsupported.")
+    max_iter, seed = spec.get("max_iter"), spec.get("seed")
+    if not isinstance(max_iter, int) or max_iter < 1 or not isinstance(seed, int):
+        raise ValueError("Classifier specification is malformed.")
+    try:
+        from sklearn.linear_model import LogisticRegression  # type: ignore[import-untyped]
+    except ImportError as error:  # pragma: no cover - QuaPy installation supplies scikit-learn
+        raise RuntimeError("scikit-learn is required to execute classifier nodes.") from error
+    return LogisticRegression(max_iter=max_iter, random_state=seed)
 
 
 def _run_group_id(session: Session, run: Run) -> str:

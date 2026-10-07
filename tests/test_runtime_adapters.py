@@ -85,16 +85,32 @@ def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
         "schema_version": 1,
         "nodes": [
             {"id": "dataset", "type": "dataset", "version": 1, "config": config},
+            {"id": "split", "type": "split", "version": 1, "config": {}},
+            {"id": "classifier", "type": "classifier", "version": 1, "config": {}},
             {"id": "acc", "type": "acc", "version": 1, "config": {}},
             {"id": "evaluation", "type": "evaluation", "version": 1, "config": {}},
         ],
         "edges": [
             {
-                "id": "one",
+                "id": "dataset-split",
                 "source": "dataset",
                 "source_port": "dataset",
+                "target": "split",
+                "target_port": "dataset",
+            },
+            {
+                "id": "split-acc",
+                "source": "split",
+                "source_port": "train",
                 "target": "acc",
                 "target_port": "train",
+            },
+            {
+                "id": "classifier-acc",
+                "source": "classifier",
+                "source_port": "classifier",
+                "target": "acc",
+                "target_port": "classifier",
             },
             {
                 "id": "two",
@@ -102,6 +118,13 @@ def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
                 "source_port": "quantifier",
                 "target": "evaluation",
                 "target_port": "quantifier",
+            },
+            {
+                "id": "split-evaluation",
+                "source": "split",
+                "source_port": "test",
+                "target": "evaluation",
+                "target_port": "test",
             },
         ],
     }
@@ -209,6 +232,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "version": 1,
                 "config": {"train_proportion": 0.7},
             },
+            {"id": "classifier", "type": "classifier", "version": 1, "config": {}},
             {"id": "acc", "type": "acc", "version": 1, "config": {}},
             {"id": "evaluation", "type": "evaluation", "version": 1, "config": {}},
         ],
@@ -228,11 +252,25 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "target_port": "train",
             },
             {
+                "id": "classifier-acc",
+                "source": "classifier",
+                "source_port": "classifier",
+                "target": "acc",
+                "target_port": "classifier",
+            },
+            {
                 "id": "acc-evaluation",
                 "source": "acc",
                 "source_port": "quantifier",
                 "target": "evaluation",
                 "target_port": "quantifier",
+            },
+            {
+                "id": "split-evaluation",
+                "source": "split",
+                "source_port": "test",
+                "target": "evaluation",
+                "target_port": "test",
             },
         ],
     }

@@ -88,7 +88,10 @@ def default_registry() -> NodeRegistry:
                 "Split",
                 "data",
                 inputs=(PortDefinition("dataset", labelled),),
-                outputs=(PortDefinition("train", labelled),),
+                outputs=(
+                    PortDefinition("train", labelled),
+                    PortDefinition("test", labelled),
+                ),
                 config_schema={
                     "type": "object",
                     "properties": {
@@ -107,8 +110,7 @@ def default_registry() -> NodeRegistry:
                 1,
                 "Classifier",
                 "model",
-                inputs=(PortDefinition("train", labelled),),
-                outputs=(PortDefinition("classifier", "classifier"),),
+                outputs=(PortDefinition("classifier", "classifier_spec"),),
                 config_schema={
                     "type": "object",
                     "properties": {
@@ -123,7 +125,10 @@ def default_registry() -> NodeRegistry:
                 1,
                 "ACC",
                 "quantifier",
-                inputs=(PortDefinition("train", labelled),),
+                inputs=(
+                    PortDefinition("train", labelled),
+                    PortDefinition("classifier", "classifier_spec"),
+                ),
                 outputs=(PortDefinition("quantifier", "fitted_quantifier"),),
             ),
             NodeDefinition(
@@ -131,7 +136,10 @@ def default_registry() -> NodeRegistry:
                 1,
                 "Evaluation",
                 "evaluation",
-                inputs=(PortDefinition("quantifier", "fitted_quantifier"),),
+                inputs=(
+                    PortDefinition("quantifier", "fitted_quantifier"),
+                    PortDefinition("test", labelled),
+                ),
                 outputs=(PortDefinition("report", "evaluation_report"),),
             ),
         )

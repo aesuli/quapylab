@@ -6,16 +6,39 @@ def workflow() -> dict[str, object]:
         "schema_version": 1,
         "nodes": [
             {"id": "dataset", "type": "dataset", "version": 1},
+            {"id": "split", "type": "split", "version": 1},
+            {"id": "classifier", "type": "classifier", "version": 1},
             {"id": "acc", "type": "acc", "version": 1},
             {"id": "evaluation", "type": "evaluation", "version": 1},
         ],
         "edges": [
             {
-                "id": "dataset-acc",
+                "id": "classifier-acc",
+                "source": "classifier",
+                "source_port": "classifier",
+                "target": "acc",
+                "target_port": "classifier",
+            },
+            {
+                "id": "dataset-split",
                 "source": "dataset",
                 "source_port": "dataset",
+                "target": "split",
+                "target_port": "dataset",
+            },
+            {
+                "id": "split-acc",
+                "source": "split",
+                "source_port": "train",
                 "target": "acc",
                 "target_port": "train",
+            },
+            {
+                "id": "split-evaluation",
+                "source": "split",
+                "source_port": "test",
+                "target": "evaluation",
+                "target_port": "test",
             },
             {
                 "id": "acc-evaluation",
@@ -35,7 +58,7 @@ def test_valid_workflow_returns_deterministic_compilation_order() -> None:
 
     assert response.status_code == 200
     assert response.get_json() == {
-        "topological_order": ["dataset", "acc", "evaluation"],
+        "topological_order": ["classifier", "dataset", "split", "acc", "evaluation"],
         "valid": True,
     }
 
@@ -59,7 +82,6 @@ def test_cycles_are_rejected_before_compilation() -> None:
     edges = payload["edges"]
     assert isinstance(nodes, list)
     assert isinstance(edges, list)
-    nodes.append({"id": "split", "type": "split", "version": 1})
     edges.append(
         {
             "id": "evaluation-split",

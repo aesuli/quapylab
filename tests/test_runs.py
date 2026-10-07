@@ -9,16 +9,39 @@ def graph() -> dict[str, object]:
         "schema_version": 1,
         "nodes": [
             {"id": "dataset", "type": "dataset", "version": 1, "config": {}},
+            {"id": "split", "type": "split", "version": 1, "config": {}},
+            {"id": "classifier", "type": "classifier", "version": 1, "config": {}},
             {"id": "acc", "type": "acc", "version": 1, "config": {}},
             {"id": "evaluation", "type": "evaluation", "version": 1, "config": {}},
         ],
         "edges": [
             {
-                "id": "dataset-acc",
+                "id": "dataset-split",
                 "source": "dataset",
                 "source_port": "dataset",
+                "target": "split",
+                "target_port": "dataset",
+            },
+            {
+                "id": "split-acc",
+                "source": "split",
+                "source_port": "train",
                 "target": "acc",
                 "target_port": "train",
+            },
+            {
+                "id": "classifier-acc",
+                "source": "classifier",
+                "source_port": "classifier",
+                "target": "acc",
+                "target_port": "classifier",
+            },
+            {
+                "id": "split-evaluation",
+                "source": "split",
+                "source_port": "test",
+                "target": "evaluation",
+                "target_port": "test",
             },
             {
                 "id": "acc-evaluation",
@@ -56,7 +79,7 @@ def test_runs_are_enqueued_with_structured_node_logs_and_can_be_cancelled() -> N
     run = response.get_json()
     assert run["status"] == "queued"
     nodes = client.get(f"/api/v1/runs/{run['id']}/nodes").get_json()["items"]
-    assert [node["state"] for node in nodes] == ["pending", "pending", "pending"]
+    assert [node["state"] for node in nodes] == ["pending"] * 5
     assert set(nodes[0]["logs"][0]) == {"timestamp", "level", "node_id", "event", "message"}
 
     cancelled = client.post(f"/api/v1/runs/{run['id']}/cancel")

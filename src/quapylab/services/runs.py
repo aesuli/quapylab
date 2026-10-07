@@ -44,6 +44,14 @@ class RunService:
         graph = WorkflowSpec.model_validate(revision.graph)
         compilation = validate_workflow(graph, self._registry)
         nodes = {node.id: node for node in graph.nodes}
+        input_bindings = {
+            node.id: {
+                edge.target_port: {"node_id": edge.source, "port": edge.source_port}
+                for edge in graph.edges
+                if edge.target == node.id
+            }
+            for node in graph.nodes
+        }
         run = Run(
             project_id=project.id,
             workflow_revision_id=revision.id,
@@ -63,7 +71,16 @@ class RunService:
                     node_type=node.type,
                     node_version=node.version,
                     state="pending",
-                    resolved_config=node.config,
+                    # These private fields turn the immutable graph into an execution plan.
+                    # Runtime adapters consume artifact bindings rather than locating nodes by type.
+                    resolved_config={
+                        **node.config,
+                        "__inputs": input_bindings[node.id],
+                        "__outputs": [
+                            port.name
+                            for port in self._registry.get(node.type, node.version).outputs
+                        ],
+                    },
                     logs=[_log(node.id, "info", "node.pending", "Node is queued.")],
                 )
             )
