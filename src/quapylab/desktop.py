@@ -1,8 +1,10 @@
 """Native pywebview host for the same Flask application used on the web."""
 
+from pathlib import Path
 from typing import Any, cast
 
 from quapylab.app import create_app
+from quapylab.execution.backends import ProcessRunBackend
 
 
 def run_desktop(*, smoke_test: bool = False) -> int:
@@ -13,13 +15,22 @@ def run_desktop(*, smoke_test: bool = False) -> int:
 
     import webview
 
-    webview.create_window(
+    config = application.extensions["quapylab.config"]
+    artifact_root = cast(Path, application.extensions["quapylab.artifact_root"])
+    backend = ProcessRunBackend(config.database_url, artifact_root)
+    backend.recover()
+    application.extensions["quapylab.run_backend"] = backend
+    window = webview.create_window(
         "QuaPy Lab",
         cast(Any, application),
         width=1280,
         height=800,
         min_size=(900, 600),
     )
-    webview.start()
+    window.events.closed += backend.close
+    try:
+        webview.start()
+    finally:
+        backend.close()
     return 0
 

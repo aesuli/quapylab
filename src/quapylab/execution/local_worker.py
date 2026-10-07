@@ -6,6 +6,7 @@ failure handling while the registry/executor layer owns scientific execution.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from inspect import signature
@@ -35,19 +36,23 @@ class LocalWorker:
             return self._runs.recover_interrupted(session)
 
     def run_once(self) -> bool:
+        return self.run(None)
+
+    def run(self, run_id: str | None) -> bool:
         with self._database.transaction() as session:
-            run = self._runs.claim_next(session)
+            run = self._runs.claim(session, run_id) if run_id else self._runs.claim_next(session)
             if run is None:
                 return False
-            run_id = run.id
+            self._runs.record_worker_process(session, run.id, os.getpid())
+            claimed_run_id = run.id
         with self._database.transaction() as session:
-            run = session.get(Run, run_id)
+            run = session.get(Run, claimed_run_id)
             if run is None or not self._runs.start(session, run):
                 return True
 
         while True:
             with self._database.transaction() as session:
-                run = session.get(Run, run_id)
+                run = session.get(Run, claimed_run_id)
                 if run is None:
                     return True
                 if run.status == "cancelling":

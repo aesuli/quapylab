@@ -93,6 +93,19 @@ class RunService:
         self._projects.get_project(session, actor=actor, project_id=run.project_id)
         return run
 
+    def list_for_project(
+        self, session: Session, *, actor: ActorContext, project_id: str, limit: int = 50
+    ) -> list[Run]:
+        project = self._projects.get_project(session, actor=actor, project_id=project_id)
+        return list(
+            session.scalars(
+                select(Run)
+                .where(Run.project_id == project.id)
+                .order_by(Run.requested_at.desc(), Run.id.desc())
+                .limit(limit)
+            )
+        )
+
     def list_nodes(self, session: Session, *, actor: ActorContext, run_id: str) -> list[NodeRun]:
         self.get(session, actor=actor, run_id=run_id)
         return self.list_nodes_for_worker(session, run_id)
@@ -135,6 +148,15 @@ class RunService:
     def claim_next(self, session: Session) -> Run | None:
         run = session.scalar(select(Run).where(Run.status == "queued").order_by(Run.requested_at))
         if run is None:
+            return None
+        run.status = "preparing"
+        self._heartbeat(run)
+        return run
+
+    def claim(self, session: Session, run_id: str) -> Run | None:
+        """Claim one specific immutable run for a dedicated worker process."""
+        run = session.get(Run, run_id)
+        if run is None or run.status != "queued":
             return None
         run.status = "preparing"
         self._heartbeat(run)
@@ -189,6 +211,26 @@ class RunService:
             self._heartbeat(run)
         return len(active)
 
+    def record_worker_process(self, session: Session, run_id: str, pid: int) -> None:
+        run = session.get(Run, run_id)
+        if run is None or run.status not in RUN_ACTIVE:
+            return
+        state = dict(run.environment.get("state", {}))
+        run.environment = {**run.environment, "state": {**state, "worker_pid": pid}}
+
+    def reconcile_worker_exit(self, session: Session, run_id: str, return_code: int) -> None:
+        """Resolve a child process that exited without completing its run transition."""
+        run = session.get(Run, run_id)
+        if run is None or run.status not in RUN_ACTIVE:
+            return
+        if run.status == "cancelling":
+            self.finish_cancelled(session, run)
+            return
+        run.status = "interrupted"
+        run.error_summary = f"Worker process exited unexpectedly with code {return_code}."
+        self._set_pending_nodes(session, run.id, "skipped", "run.interrupted")
+        self._heartbeat(run)
+
     @staticmethod
     def _set_pending_nodes(session: Session, run_id: str, state: str, event: str) -> None:
         nodes = session.scalars(select(NodeRun).where(NodeRun.run_id == run_id))
@@ -202,7 +244,11 @@ class RunService:
 
     @staticmethod
     def _heartbeat(run: Run) -> None:
-        run.environment = {**run.environment, "state": {"heartbeat_at": _timestamp()}}
+        state = dict(run.environment.get("state", {}))
+        run.environment = {
+            **run.environment,
+            "state": {**state, "heartbeat_at": _timestamp()},
+        }
 
 
 def _timestamp() -> str:

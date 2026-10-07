@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from quapylab.app import create_app
+from quapylab.execution.backends import ProcessRunBackend
 from quapylab.execution.local_worker import LocalWorker
 from quapylab.execution.runtime_adapters import RuntimeNodeExecutor
 from quapylab.nodes.registry import default_registry
@@ -38,13 +39,24 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--once", action="store_true", help="process at most one queued run")
     worker.add_argument("--poll-seconds", default=1.0, type=float)
     worker.add_argument("--artifact-root", default=".quapylab/artifacts")
+    worker.add_argument("--run-id", help="execute one specific queued run")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "serve":
-        create_app().run(host=args.host, port=args.port, debug=args.debug)
+        application = create_app()
+        config = application.extensions["quapylab.config"]
+        backend = ProcessRunBackend(
+            config.database_url, application.extensions["quapylab.artifact_root"]
+        )
+        backend.recover()
+        application.extensions["quapylab.run_backend"] = backend
+        try:
+            application.run(host=args.host, port=args.port, debug=args.debug)
+        finally:
+            backend.close()
         return 0
     if args.command == "desktop":
         from quapylab.desktop import run_desktop
@@ -75,6 +87,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         recovered = worker.recover()
         if recovered:
             print(f"Marked {recovered} interrupted run(s).")
+        if args.run_id:
+            return 0 if worker.run(args.run_id) else 1
         if args.once:
             return 0 if worker.run_once() else 1
         while True:

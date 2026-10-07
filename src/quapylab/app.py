@@ -69,6 +69,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
             else Path(".quapylab") / "artifacts"
         )
     artifacts = ArtifactService(LocalArtifactStore(Path(artifact_root)))
+    app.extensions["quapylab.artifact_root"] = Path(artifact_root)
     app.extensions["quapylab.artifacts"] = artifacts
     app.extensions["quapylab.datasets"] = DatasetService(artifacts)
     if not config or "SESSION_COOKIE_SECURE" not in config:
@@ -458,14 +459,20 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
             )
             return jsonify(project_json(project)), 200
 
-    @app.post("/api/v1/projects/<project_id>/runs")
-    def enqueue_run(project_id: str) -> tuple[Any, int]:
+    @app.route("/api/v1/projects/<project_id>/runs", methods=["GET", "POST"])
+    def project_runs(project_id: str) -> tuple[Any, int]:
+        service: RunService = app.extensions["quapylab.runs"]
+        if request.method == "GET":
+            with database.transaction() as session:
+                runs = service.list_for_project(
+                    session, actor=g.actor, project_id=project_id
+                )
+                return jsonify({"items": [run_json(item) for item in runs]}), 200
         payload = request_json()
         revision_id = payload.get("workflow_revision_id")
         seed = payload.get("seed", 0)
         if not isinstance(revision_id, str) or not isinstance(seed, int) or isinstance(seed, bool):
             raise ValueError("Workflow revision ID and integer seed are required.")
-        service: RunService = app.extensions["quapylab.runs"]
         with database.transaction() as session:
             run = service.enqueue(
                 session,
@@ -474,7 +481,12 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 workflow_revision_id=revision_id,
                 seed=seed,
             )
-            return jsonify(run_json(run)), 202
+            run_id = run.id
+            response = run_json(run)
+        backend = app.extensions.get("quapylab.run_backend")
+        if backend is not None:
+            backend.submit(run_id)
+        return jsonify(response), 202
 
     @app.get("/api/v1/runs/<run_id>")
     def run(run_id: str) -> tuple[Any, int]:
@@ -486,7 +498,11 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     def cancel_run(run_id: str) -> tuple[Any, int]:
         service: RunService = app.extensions["quapylab.runs"]
         with database.transaction() as session:
-            return jsonify(run_json(service.cancel(session, actor=g.actor, run_id=run_id))), 200
+            response = run_json(service.cancel(session, actor=g.actor, run_id=run_id))
+        backend = app.extensions.get("quapylab.run_backend")
+        if backend is not None:
+            backend.cancel(run_id)
+        return jsonify(response), 200
 
     @app.get("/api/v1/runs/<run_id>/nodes")
     def run_nodes(run_id: str) -> tuple[Any, int]:
@@ -697,6 +713,8 @@ def run_json(run: Any) -> dict[str, Any]:
         "seed": run.seed,
         "environment": run.environment,
         "error_summary": run.error_summary,
+        "requested_at": run.requested_at.isoformat(),
+        "cancelled_at": run.cancelled_at.isoformat() if run.cancelled_at else None,
     }
 
 

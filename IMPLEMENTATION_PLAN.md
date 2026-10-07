@@ -362,7 +362,35 @@ Standalone/desktop mode binds to `127.0.0.1` by default and uses an implicit loc
 
 ## 7. Delivery plan
 
-Estimates assume one experienced full-time developer and include implementation plus automated tests, not long research pauses. Re-estimate after Phase 1. With web authentication and group sharing included, a credible Lab MVP is approximately 16–21 weeks; the automation API and QuaPy Model Server are separate follow-on projects.
+Estimates assume one experienced full-time developer and include implementation plus automated tests, not long research pauses. The original 16–21 week estimate remains a planning baseline rather than a forecast: implementation has progressed across Phases 1–4 in vertical slices, so the remaining work should be re-estimated after the scientific-reproducibility slice below. The automation API and QuaPy Model Server remain separate follow-on projects.
+
+### Current implementation status (2026-10-07)
+
+The repository now contains the first usable vertical slice rather than only the Phase-0 architecture. A user can create a project and versioned visual workflow, ingest CSV/TSV or a curated QuaPy dataset, configure typed nodes, execute a minimal dataset -> split -> classifier -> ACC -> evaluation -> HTML report graph in a dedicated child process, monitor or cancel it, and reopen persisted run history and artifacts. Desktop and standalone modes install the process-backed run backend automatically; WSGI deployments retain the explicit worker/backend boundary.
+
+All status claims below refer to code and automated tests present in the repository, not to the full exit criteria of a phase.
+
+| Phase | Status | Implemented | Important remaining work |
+| --- | --- | --- | --- |
+| 0 — decisions and spikes | Substantially complete | ADRs, application/runtime boundaries, direct QuaPy example, React Flow shell, pywebview and PyInstaller scaffolding | Re-run packaging measurements and confirm optional dependency/license matrix before release. |
+| 1 — foundation, identity, and contracts | In progress | Flask factory, configuration, SQLAlchemy/Alembic baseline, local accounts, sessions/CSRF, groups/roles/projects, immutable workflow revisions, authorization services, artifact store, login/group/project UI | PostgreSQL integration, complete authorization/security matrix, audit coverage, structured logging, OpenAPI/generated client, disabled-account/session-revocation cases, and Windows/Linux CI. |
+| 2 — dataset vertical slice | In progress | CSV/TSV ingestion, schema inference/preview metadata, immutable versions, content hashes, curated QuaPy imports, dataset-aware node configuration | Persist split indices, schema override flow, missing-value/class-mapping UX, canonical tabular storage, stronger malformed/oversized upload tests, and dedicated dataset pages. |
+| 3 — workflow editor | In progress | Server-owned definitions, typed handles, connection validation, inspector forms, save/reload, immutable revisions, zoom/controls | Delete/duplicate, undo/redo, keyboard access, auto-layout/minimap, dirty-state handling, unknown-node placeholders, component tests, and Playwright coverage. |
+| 4 — execution and QuaPy core | In progress | Durable run/node state, dedicated process per run, PID/heartbeat metadata, cancellation escalation, crash/restart recovery, trusted artifact verification, ACC execution, MAE result, HTML report, polling, run history and artifact reopening | Periodic heartbeat during long nodes, persisted split provenance, environment/dependency snapshot, timing/resource limits, APP/NPP, preprocessing and model-save adapters, concurrency tests, and direct-QuaPy golden results. |
+| 5 — optimization, comparison, reporting | Not started beyond the minimal report | One normalized MAE result and self-contained HTML report | Multiple quantifiers, protocols, paired samples, metric suite, `GridSearchQ`, comparison/ranking UI, scientific plots, and exports. |
+| 6 — model library and interactive validation | Not started | Trusted fitted-quantifier artifact exists as an internal run output | Promotion, model records/UI, schema-checked unlabelled prediction, bundle manifest, dependency constraints, checksums, and export verification. |
+| 7 — distribution and release hardening | Early scaffolding | `serve`, `desktop`, `worker`, administrator bootstrap, pywebview launcher, PyInstaller spec | Data-directory/loopback-secret hardening, database upgrade/diagnostic commands, WSGI deployment tests, clean Windows/Linux builds, shutdown tests, documentation, backup/restore, and release checklist. |
+
+### Next implementation sequence
+
+Work should proceed in this order so broader algorithm coverage is built on trustworthy experimental semantics:
+
+1. **Stabilize the vertical slice.** Split the large editor component, add frontend component tests and one browser-level CSV-to-report test, make artifact actions media-type aware, and add pagination to run history.
+2. **Make runs reproducible.** Persist split indices and dataset-version bindings, capture exact dependency/environment metadata and resolved configuration, record node/run timings, validate prevalence vectors, and add direct-QuaPy golden tests under fixed seeds.
+3. **Add quantification protocols and comparisons.** Implement APP/NPP and per-sample results, then add PCC, PACC, EMQ, HDy, and DMy/DMx incrementally with explicit capability constraints and paired comparison data.
+4. **Add safe preprocessing and optimization.** Introduce allow-listed tabular preprocessing with train-only fitting, followed by `GridSearchQ`, parameter-grid forms, refit semantics, and bounded `n_jobs`.
+5. **Complete the model lifecycle.** Promote fitted pipelines, validate unlabelled batches, retain prediction history, and export integrity-checked model bundles with input signature, class order, provenance, and dependency constraints.
+6. **Harden collaboration and distribution.** Complete PostgreSQL and authorization matrices, audit/security testing, Windows/Linux CI, native packaging, WSGI deployment, backup/restore, and release documentation.
 
 ### Phase 0 — decisions and spikes (1 week)
 
@@ -509,9 +537,9 @@ Exit: source install, localhost server, WSGI deployment, and checksummed Windows
 | Nested parallelism exhausts desktop resources. | Central resource policy passes bounded `n_jobs` and sets numerical-library thread limits per worker. |
 | Scientific comparisons are misleading. | Preserve paired sample IDs, expose full distributions and failures, label descriptive statistics, add inferential tests only with documented assumptions. |
 
-## 11. Decisions needed before Phase 2
+## 11. Recorded product decisions
 
-Recommended defaults are shown first; these are product choices rather than blockers for Phase 0/1.
+These defaults now guide the implementation. Revisit them through an ADR when evidence requires a change rather than treating them as open blockers.
 
 1. Deployment modes: passwordless single-user desktop and authenticated multi-user web are both MVP requirements; PostgreSQL is required for supported web deployment.
 2. Platform order: implement and validate on Windows first, but require Linux source, WSGI, worker, and native-package tests before the MVP release; macOS may follow later.
@@ -534,23 +562,40 @@ Add only when scripts, CI, or remote integrations are an actual use case. Its st
 
 Start from the exported bundle contract, not the Lab database. The initial server should provide readiness/version/model-metadata endpoints and one authenticated batch-prediction operation. Deployment should atomically approve and activate bundles, verify checksums before loading, enforce the input signature and resource limits, expose operational metrics, and support rollback. Training and experiment management remain exclusively in QuaPy Lab.
 
-## 13. First implementation backlog
+## 13. Implementation backlog
 
-These are the first independently reviewable changes after the Phase-0 spikes:
+### Foundation backlog status
 
-1. Initialize `pyproject.toml`, source package, frontend workspace, and unified developer commands.
-2. Add `create_app`, `/health/live`, `/version`, configuration tests, and frontend static fallback.
-3. Add explicit desktop/web configuration and an `ActorContext`; bootstrap the implicit desktop user and personal group.
-4. Add SQLAlchemy/Alembic user, credential, group, membership, session, audit, project, workflow, revision, run, node-run, and artifact tables, exercising SQLite and PostgreSQL.
-5. Implement local web authentication, administrator bootstrap, session/CSRF handling, group roles, centralized authorization policies, and their security matrix tests.
-6. Build login, active-group, membership, and permission-aware project screens, hidden appropriately in desktop mode.
-7. Define the versioned workflow schema and five minimal node definitions: dataset, split, classifier, ACC, evaluation.
-8. Implement registry discovery without arbitrary imports and return definitions through `/api/v1/node-types`.
-9. Implement server graph validation/topological sorting with detailed errors and property tests.
-10. Add atomic content-addressed local artifact storage with hash verification and group-scoped authorization metadata.
-11. Build the React Flow shell, palette, inspector, save/reload, and validation display.
-12. Implement CSV ingestion/versioning and the small deterministic dataset fixture.
-13. Implement the local process worker and the minimal QuaPy reference workflow with initiating-actor provenance.
+Legend: **complete** means the originally described slice is present and tested; **partial** means useful implementation exists but one or more explicit requirements remain.
+
+1. **Complete:** initialize `pyproject.toml`, source package, frontend workspace, and unified developer commands.
+2. **Complete:** add `create_app`, `/health/live`, `/version`, configuration tests, and frontend static fallback.
+3. **Complete:** add explicit desktop/web configuration and an `ActorContext`; bootstrap the implicit desktop user and personal group.
+4. **Partial:** add the SQLAlchemy/Alembic baseline for users, credentials, groups, memberships, sessions, audits, projects, workflows, revisions, datasets, runs, node runs, artifacts, and models. SQLite is exercised; PostgreSQL migration and transactional integration coverage remains.
+5. **Partial:** implement local web authentication, administrator bootstrap, sessions/CSRF, login throttling, group roles, and centralized authorization. The exhaustive security matrix, audit events, disabled-account behavior, and multi-process throttling remain.
+6. **Partial:** build login, active-group, membership, project, and permission-aware screens with desktop-mode hiding. Account administration and several role-specific UX paths remain.
+7. **Complete:** define the versioned workflow schema and the initial dataset, split, classifier, ACC, evaluation, and report definitions.
+8. **Complete:** expose the allow-listed server-owned registry through `/api/v1/node-types` without client-controlled imports.
+9. **Partial:** implement graph validation and deterministic topological sorting with structured errors. Property-based DAG coverage and unknown-version migration behavior remain.
+10. **Complete for the local backend:** add atomic content-addressed artifact storage, hash verification before trusted deserialization, provenance, and group-scoped reads. Garbage collection and orphan reconciliation remain operational follow-ups.
+11. **Partial:** build the React Flow shell, typed handles, inspector, save/reload, validation, dataset configuration, execution state, cancellation, artifact links, and run history. The remaining Phase-3 editing and accessibility features are listed above.
+12. **Partial:** implement CSV/TSV ingestion/versioning, curated QuaPy imports, schema metadata, and deterministic fixtures. Persisted split indices and the complete ingestion wizard remain.
+13. **Partial:** implement dedicated local worker processes, run-specific claiming, cancellation escalation, crash/restart reconciliation, initiating-actor provenance, ACC execution, MAE evaluation, reports, and subprocess integration tests. APP/NPP and full reproducibility capture remain.
+
+### Immediate implementation backlog
+
+These are the next independently reviewable changes:
+
+1. Refactor `WorkflowEditor` into focused editor, dataset-import, run-history, and result components; add component tests for save, enqueue, poll, cancel, history restore, and artifact actions.
+2. Add one Playwright path for project creation -> CSV import -> workflow construction -> process-backed run -> report retrieval.
+3. Replace materialized-only splitting with a versioned split artifact containing source dataset-version ID, train/test row indices, seed, strategy, and class distribution; reconstruct collections from those immutable inputs.
+4. Capture the exact application/Python/QuaPy/scikit-learn/NumPy environment, resolved node configuration, dataset-version bindings, wall time, and node timing in every run.
+5. Add prevalence-output invariants and golden tests comparing the Lab's ACC/MAE result with a direct QuaPy script under the same data and seed.
+6. Add APP and NPP protocol definitions/adapters plus a normalized per-sample evaluation artifact with sample IDs, true prevalence, estimated prevalence, and metric values.
+7. Add PCC and PACC after the protocol artifact is stable; then add EMQ and the distribution-matching methods with registry-declared binary/multiclass and dependency constraints.
+8. Build paired result comparison, rankings, timing summaries, CSV/JSON export, and the first binary diagonal/error-by-drift plots.
+9. Add allow-listed tabular preprocessing with explicit train-only fitting and leakage-focused tests.
+10. Exercise PostgreSQL, role/authorization matrices, process concurrency, worker cancellation, and packaging on Windows and Linux CI before declaring the execution phases complete.
 
 ## 14. Research basis
 
