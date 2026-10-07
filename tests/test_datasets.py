@@ -4,6 +4,7 @@ from quapylab.app import create_app
 from quapylab.domain.actor import desktop_actor
 from quapylab.persistence.models import Group, GroupMembership, GroupType, MembershipRole
 from quapylab.services.authentication import AuthenticationService
+from quapylab.services.datasets import _quapy_dataset_display_name
 
 
 def test_csv_ingestion_exposes_an_immutable_schema_preview() -> None:
@@ -113,3 +114,9 @@ def test_quapy_source_catalog_exposes_loader_specific_options() -> None:
     sources = {item["id"]: item for item in response.get_json()["items"]}
     assert sources["reviews"]["options"] == {"tfidf": "boolean", "min_df": "integer|null"}
     assert sources["twitter"]["options"]["for_model_selection"] == "boolean"
+
+
+def test_quapy_dataset_display_name_includes_the_resolved_variant() -> None:
+    assert _quapy_dataset_display_name("reviews", "hp", {"tfidf": True, "min_df": 3}) == (
+        "hp · reviews · min_df=3, tfidf=True"
+    )

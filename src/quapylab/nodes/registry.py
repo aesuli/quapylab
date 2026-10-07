@@ -68,7 +68,17 @@ def default_registry() -> NodeRegistry:
                 config_schema={
                     "type": "object",
                     "required": ["dataset_version_id"],
-                    "properties": {"dataset_version_id": {"type": "string", "format": "uuid"}},
+                    "properties": {
+                        "dataset_version_id": {"type": "string", "format": "uuid"},
+                        "representation": {
+                            "type": "string",
+                            "enum": ["tabular", "text", "precomputed_matrix"],
+                            "default": "tabular",
+                        },
+                        "label_column": {"type": "string"},
+                        "feature_columns": {"type": "array", "items": {"type": "string"}},
+                        "text_column": {"type": "string"},
+                    },
                     "additionalProperties": False,
                 },
             ),

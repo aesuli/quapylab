@@ -191,7 +191,6 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
         f"/api/v1/projects/{project_id}/datasets",
         data={
             "name": "Numeric training data",
-            "label_column": "label",
             "file": (BytesIO(f"feature,label\n{rows}\n".encode()), "training.csv"),
         },
     ).get_json()
@@ -202,7 +201,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "id": "dataset",
                 "type": "dataset",
                 "version": 1,
-                "config": {"dataset_version_id": dataset["id"]},
+                "config": {"dataset_version_id": dataset["id"], "label_column": "label"},
             },
             {
                 "id": "split",

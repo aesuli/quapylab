@@ -143,6 +143,7 @@ class DatasetService:
         schema = {
             "columns": _quapy_columns(train.instances),
             "splits": {"training_rows": len(train), "test_rows": len(test)},
+            "representation": _quapy_representation(train.instances),
         }
         materialization = self._artifacts.create(
             session,
@@ -152,7 +153,11 @@ class DatasetService:
             content=pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL),
             serialization={"format": "pickle", "trusted_producer": "quapy-loader"},
         )
-        dataset = Dataset(project_id=project.id, name=dataset_name, is_labelled=True)
+        dataset = Dataset(
+            project_id=project.id,
+            name=_quapy_dataset_display_name(source_id, dataset_name, normalized),
+            is_labelled=True,
+        )
         session.add(dataset)
         session.flush()
         version = DatasetVersion(
@@ -166,6 +171,7 @@ class DatasetService:
                 "loader": source_id,
                 "dataset": dataset_name,
                 "options": normalized,
+                "representation": _quapy_representation(train.instances),
                 "artifact_id": materialization.id,
             },
             artifact_hashes=[materialization.sha256],
@@ -260,6 +266,16 @@ def _load_quapy(source_id: str, dataset_name: str, options: dict[str, Any]) -> A
     return datasets.fetch_UCIMulticlassDataset(dataset_name, **options)
 
 
+def _quapy_dataset_display_name(
+    source_id: str, dataset_name: str, options: dict[str, Any]
+) -> str:
+    """Keep source variants distinguishable in project-level dataset selectors."""
+    if not options:
+        return f"{dataset_name} · {source_id}"
+    rendered_options = ", ".join(f"{key}={options[key]!r}" for key in sorted(options))
+    return f"{dataset_name} · {source_id} · {rendered_options}"
+
+
 def _quapy_columns(instances: Any) -> list[dict[str, Any]]:
     shape = getattr(instances, "shape", None)
     if shape is not None and len(shape) > 1:
@@ -268,3 +284,8 @@ def _quapy_columns(instances: Any) -> list[dict[str, Any]]:
             for index in range(shape[1])
         ]
     return [{"name": "document", "type": "string", "nullable": False}]
+
+
+def _quapy_representation(instances: Any) -> str:
+    shape = getattr(instances, "shape", None)
+    return "precomputed_matrix" if shape is not None and len(shape) > 1 else "text"

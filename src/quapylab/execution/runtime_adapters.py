@@ -11,9 +11,10 @@ import io
 import json
 import pickle
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from inspect import signature
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -49,15 +50,15 @@ class RuntimeNodeExecutor:
         adapter(session, run, node)
 
     def _dataset(self, session: Session, run: Run, node: NodeRun) -> None:
-        version_id = _dataset_version_id(node.resolved_config)
-        version = session.get(DatasetVersion, version_id)
+        config = _dataset_config(node.resolved_config)
+        version = session.get(DatasetVersion, config.version_id)
         if version is None:
             raise ValueError("Dataset configuration references an unknown dataset version.")
         dataset = session.get(Dataset, version.dataset_id)
         if dataset is None or dataset.project_id != run.project_id:
             raise ValueError("Dataset configuration references a dataset outside this project.")
         artifact = _dataset_materialization(
-            session, run, node, version, self._artifacts, self._store_materialization
+            session, run, node, version, config, self._artifacts, self._store_materialization
         )
         node.output_artifact_ids = [artifact.id]
         _log(node, "dataset.loaded", "Loaded immutable trusted QuaPy materialization.")
@@ -169,8 +170,8 @@ class RuntimeNodeExecutor:
     def _dataset_from_dataset_node(self, session: Session, run: Run) -> Any:
         source = _node(session, run, "dataset")
         assert source is not None
-        version_id = _dataset_version_id(source.resolved_config)
-        version = session.get(DatasetVersion, version_id)
+        config = _dataset_config(source.resolved_config)
+        version = session.get(DatasetVersion, config.version_id)
         if version is None:
             raise RuntimeError("Dataset node references a missing dataset version.")
         artifact = _dataset_output_artifact(session, run, source)
@@ -210,12 +211,51 @@ class RuntimeNodeExecutor:
         )
 
 
-def _dataset_version_id(config: dict[str, Any]) -> str:
-    if set(config) != {"dataset_version_id"} or not isinstance(
-        config.get("dataset_version_id"), str
-    ) or not config["dataset_version_id"].strip():
-        raise ValueError("Dataset node config must contain only a non-empty dataset_version_id.")
-    return cast(str, config["dataset_version_id"])
+@dataclass(frozen=True, slots=True)
+class DatasetConfig:
+    version_id: str
+    representation: str
+    label_column: str | None
+    feature_columns: tuple[str, ...] | None
+    text_column: str | None
+
+
+def _dataset_config(config: dict[str, Any]) -> DatasetConfig:
+    allowed = {
+        "dataset_version_id",
+        "representation",
+        "label_column",
+        "feature_columns",
+        "text_column",
+    }
+    if set(config) - allowed:
+        raise ValueError("Dataset node config contains unsupported settings.")
+    version_id = config.get("dataset_version_id")
+    representation = config.get("representation", "tabular")
+    label_column = config.get("label_column")
+    feature_columns = config.get("feature_columns")
+    text_column = config.get("text_column")
+    if not isinstance(version_id, str) or not version_id.strip():
+        raise ValueError("Dataset node config must contain a non-empty dataset_version_id.")
+    if representation not in {"tabular", "text", "precomputed_matrix"}:
+        raise ValueError("Dataset node representation is unsupported.")
+    if label_column is not None and (not isinstance(label_column, str) or not label_column.strip()):
+        raise ValueError("Dataset node label_column must be a non-empty string when supplied.")
+    if text_column is not None and (not isinstance(text_column, str) or not text_column.strip()):
+        raise ValueError("Dataset node text_column must be a non-empty string when supplied.")
+    if feature_columns is not None and (
+        not isinstance(feature_columns, list)
+        or not all(isinstance(column, str) and column.strip() for column in feature_columns)
+        or len(set(feature_columns)) != len(feature_columns)
+    ):
+        raise ValueError("Dataset node feature_columns must be unique non-empty column names.")
+    return DatasetConfig(
+        version_id=version_id,
+        representation=representation,
+        label_column=label_column,
+        feature_columns=tuple(feature_columns) if feature_columns is not None else None,
+        text_column=text_column,
+    )
 
 
 def _trusted_materialization(session: Session, run: Run, version: DatasetVersion) -> Artifact:
@@ -247,6 +287,7 @@ def _dataset_materialization(
     run: Run,
     node: NodeRun,
     version: DatasetVersion,
+    config: DatasetConfig,
     artifacts: ArtifactService,
     store_materialization: Callable[[Session, Run, NodeRun, Any], Artifact],
 ) -> Artifact:
@@ -256,7 +297,7 @@ def _dataset_materialization(
         return source
     if source.kind != "dataset-source":
         raise ValueError("Dataset version has an unsupported runtime source artifact.")
-    data = _csv_labelled_collection(artifacts.read_for_worker(source), version)
+    data = _csv_labelled_collection(artifacts.read_for_worker(source), version, config)
     return store_materialization(session, run, node, data)
 
 
@@ -279,8 +320,8 @@ def _dataset_output_artifact(session: Session, run: Run, node: NodeRun) -> Artif
     return artifact
 
 
-def _csv_labelled_collection(content: bytes, version: DatasetVersion) -> Any:
-    label_column = version.ingestion_report.get("label_column")
+def _csv_labelled_collection(content: bytes, version: DatasetVersion, config: DatasetConfig) -> Any:
+    label_column = config.label_column or version.ingestion_report.get("label_column")
     if not isinstance(label_column, str) or not label_column:
         raise ValueError("A labelled CSV/TSV dataset requires a configured label column.")
     filename = version.source.get("filename")
@@ -290,15 +331,8 @@ def _csv_labelled_collection(content: bytes, version: DatasetVersion) -> Any:
     except UnicodeDecodeError as error:
         raise ValueError("Dataset source is not valid UTF-8.") from error
     columns = [item["name"] for item in version.schema.get("columns", [])]
-    features = [column for column in columns if column != label_column]
-    if not features:
-        raise ValueError("A labelled dataset requires at least one feature column.")
-    try:
-        matrix = [[float(row[feature]) for feature in features] for row in rows]
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(
-            "Initial CSV execution supports complete numeric feature columns only."
-        ) from error
+    if label_column not in columns:
+        raise ValueError("Dataset node label_column does not exist in the selected dataset.")
     labels = [row.get(label_column, "") for row in rows]
     if not rows or any(not label for label in labels):
         raise ValueError("Dataset labels must be present for every row.")
@@ -307,7 +341,35 @@ def _csv_labelled_collection(content: bytes, version: DatasetVersion) -> Any:
         from quapy.data.base import LabelledCollection  # type: ignore[import-untyped]
     except ImportError as error:  # pragma: no cover - supplied by the QuaPy installation
         raise RuntimeError("QuaPy and NumPy are required to materialize a CSV dataset.") from error
-    return LabelledCollection(np.asarray(matrix), np.asarray(labels), classes=version.classes)
+    if config.representation == "text":
+        text_column = config.text_column
+        if text_column not in columns or text_column == label_column:
+            raise ValueError(
+                "Text datasets require a non-label text_column from the selected dataset."
+            )
+        return LabelledCollection(
+            np.asarray([row[text_column] for row in rows]), np.asarray(labels), classes=None
+        )
+    if config.representation == "precomputed_matrix":
+        raise ValueError("CSV/TSV sources cannot be used as precomputed matrices.")
+    features = list(
+        config.feature_columns or (column for column in columns if column != label_column)
+    )
+    if (
+        not features
+        or label_column in features
+        or any(feature not in columns for feature in features)
+    ):
+        raise ValueError("Tabular datasets require selected non-label feature columns.")
+    try:
+        matrix = [[float(row[feature]) for feature in features] for row in rows]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "Tabular execution supports complete numeric feature columns only."
+        ) from error
+    return LabelledCollection(
+        np.asarray(matrix), np.asarray(labels), classes=version.classes or None
+    )
 
 
 def _load_pickle(artifacts: ArtifactService, artifact: Artifact) -> Any:
