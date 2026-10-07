@@ -71,6 +71,7 @@ def test_node_types_are_published_by_the_server() -> None:
         "classifier",
         "dataset",
         "evaluation",
+        "report",
         "split",
     ]
 

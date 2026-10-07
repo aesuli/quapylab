@@ -97,16 +97,23 @@ body {
 
 .lab-node__port {
   position: relative;
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2px 8px;
-  min-height: 24px;
+  display: flex;
+  min-height: 20px;
   align-items: center;
 }
 
-.lab-node__port--output { text-align: right; }
-.lab-node__port b { grid-row: 2; font-size: 8px; }
-.lab-node__port--output b { grid-column: 2; }
+.lab-node__port--input { padding-left: 20px; }
+.lab-node__port--output { justify-content: end; padding-right: 20px; text-align: right; }
+.lab-node__port::before {
+  position: absolute;
+  top: 10px;
+  width: 12px;
+  border-top: 1px solid #92aa9b;
+  content: "";
+}
+.lab-node__port--input::before { left: 8px; }
+.lab-node__port--output::before { right: 8px; }
+.lab-node__port b { margin-left: 5px; font-size: 8px; }
 
 .lab-node__ports span {
   color: #40584c;
@@ -132,7 +139,9 @@ body {
   width: 12px;
   height: 12px;
   border: 2px solid #fff;
+  z-index: 1;
 }
+
 
 .port-labelled_collection {
   background: #2d7dd2;

@@ -142,5 +142,12 @@ def default_registry() -> NodeRegistry:
                 ),
                 outputs=(PortDefinition("report", "evaluation_report"),),
             ),
+            NodeDefinition(
+                "report",
+                1,
+                "Report",
+                "output",
+                inputs=(PortDefinition("evaluation", "evaluation_report"),),
+            ),
         )
     )

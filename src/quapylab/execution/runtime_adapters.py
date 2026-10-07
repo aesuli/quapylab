@@ -7,6 +7,7 @@ documents never influence imports, file paths, or executable code.
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
 import pickle
@@ -39,6 +40,7 @@ class RuntimeNodeExecutor:
             ("classifier", 1): self._classifier,
             ("acc", 1): self._acc,
             ("evaluation", 1): self._evaluation,
+            ("report", 1): self._report,
         }
 
     def __call__(self, session: Session, run: Run, node: NodeRun) -> None:
@@ -163,6 +165,35 @@ class RuntimeNodeExecutor:
         )
         node.output_artifact_ids = [artifact.id]
         _log(node, "evaluation.completed", "Computed normalized ACC evaluation result.")
+
+    def _report(self, session: Session, run: Run, node: NodeRun) -> None:
+        artifact = _input_artifact(session, run, node, "evaluation")
+        if (
+            artifact.kind != "evaluation-result"
+            or artifact.media_type != "application/vnd.quapylab.evaluation-result+json"
+            or artifact.serialization != {"format": "json", "schema_version": 1}
+        ):
+            raise RuntimeError("Report input is not a trusted evaluation result.")
+        evaluation = json.loads(self._artifacts.read_for_worker(artifact))
+        if not isinstance(evaluation, dict):
+            raise RuntimeError("Evaluation result is malformed.")
+        content = _report_html(evaluation).encode("utf-8")
+        report = self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="evaluation-report",
+            media_type="text/html",
+            content=content,
+            serialization={"format": "html", "schema_version": 1},
+        )
+        node.output_artifact_ids = [report.id]
+        _log(
+            node,
+            "report.completed",
+            "Rendered the evaluation result as a self-contained HTML report.",
+        )
 
     def _collection_input(self, session: Session, run: Run, node: NodeRun, port: str) -> Any:
         artifact = _input_artifact(session, run, node, port)
@@ -426,6 +457,28 @@ def _classifier_from_spec(spec: dict[str, Any]) -> Any:
     except ImportError as error:  # pragma: no cover - QuaPy installation supplies scikit-learn
         raise RuntimeError("scikit-learn is required to execute classifier nodes.") from error
     return LogisticRegression(max_iter=max_iter, random_state=seed)
+
+
+def _report_html(evaluation: dict[str, Any]) -> str:
+    metric = html.escape(str(evaluation.get("metric", "metric")).upper())
+    value = html.escape(str(evaluation.get("value", "unavailable")))
+    classes = evaluation.get("classes", [])
+    estimated = evaluation.get("estimated_prevalence", [])
+    actual = evaluation.get("true_prevalence", [])
+    rows = "".join(
+        f"<tr><td>{html.escape(str(label))}</td><td>{html.escape(str(true))}</td>"
+        f"<td>{html.escape(str(predicted))}</td></tr>"
+        for label, true, predicted in zip(classes, actual, estimated, strict=True)
+    )
+    return (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<title>QuaPy Lab evaluation report</title>"
+        "<style>body{font:16px system-ui;margin:2rem;color:#17251f}table{border-collapse:collapse}"
+        "td,th{border:1px solid #b9c9bf;padding:.5rem;text-align:left}</style></head><body>"
+        f"<h1>Evaluation report</h1><p><strong>{metric}:</strong> {value}</p>"
+        "<table><thead><tr><th>Class</th><th>True prevalence</th>"
+        f"<th>Estimated prevalence</th></tr></thead><tbody>{rows}</tbody></table></body></html>"
+    )
 
 
 def _run_group_id(session: Session, run: Run) -> str:

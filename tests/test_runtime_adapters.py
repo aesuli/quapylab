@@ -89,6 +89,7 @@ def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
             {"id": "classifier", "type": "classifier", "version": 1, "config": {}},
             {"id": "acc", "type": "acc", "version": 1, "config": {}},
             {"id": "evaluation", "type": "evaluation", "version": 1, "config": {}},
+            {"id": "report", "type": "report", "version": 1, "config": {}},
         ],
         "edges": [
             {
@@ -126,6 +127,13 @@ def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
                 "target": "evaluation",
                 "target_port": "test",
             },
+            {
+                "id": "evaluation-report",
+                "source": "evaluation",
+                "source_port": "report",
+                "target": "report",
+                "target_port": "evaluation",
+            },
         ],
     }
     if config == {"dataset_version_id": "VERSION"}:
@@ -152,12 +160,16 @@ def test_runtime_executes_and_persists_a_provenanced_evaluation(monkeypatch: obj
     assert worker.run_once()
     assert client.get(f"/api/v1/runs/{run_id}").get_json()["status"] == "succeeded"
     nodes = client.get(f"/api/v1/runs/{run_id}/nodes").get_json()["items"]
-    evaluation = nodes[-1]
+    evaluation = next(node for node in nodes if node["node_type"] == "evaluation")
     artifact = client.get(f"/api/v1/artifacts/{evaluation['output_artifact_ids'][0]}").get_json()
     assert artifact["producing_run_id"] == run_id
     assert artifact["producing_node_run_id"] == evaluation["id"]
     download = client.get(f"/api/v1/artifacts/{artifact['id']}/download")
     assert json.loads(download.data)["value"] == 0.0
+    report = next(node for node in nodes if node["node_type"] == "report")
+    rendered = client.get(f"/api/v1/artifacts/{report['output_artifact_ids'][0]}/download")
+    assert rendered.content_type.startswith("text/html")
+    assert b"Evaluation report" in rendered.data
 
 
 def test_runtime_rejects_missing_dataset_configuration() -> None:
