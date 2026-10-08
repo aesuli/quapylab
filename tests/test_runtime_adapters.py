@@ -7,10 +7,17 @@ import sys
 from io import BytesIO
 from types import ModuleType
 
+import pytest
+
 from quapylab.app import create_app
 from quapylab.domain.actor import desktop_actor
 from quapylab.execution.local_worker import LocalWorker
-from quapylab.execution.runtime_adapters import RuntimeNodeExecutor
+from quapylab.execution.runtime_adapters import (
+    RuntimeNodeExecutor,
+    _classifier_from_spec,
+    _classifier_spec,
+    _tabular_transformer,
+)
 from quapylab.persistence.models import Artifact, Dataset, DatasetVersion, Project
 
 
@@ -34,6 +41,61 @@ class FixtureACC:
 
     def quantify(self, _: list[int]) -> list[float]:
         return [0.5, 0.5]
+
+
+def test_tabular_preprocessing_fits_imputation_and_scaling_on_training_only() -> None:
+    import numpy as np
+
+    transformer, resolved = _tabular_transformer({"imputation": "mean", "scaling": "standard"})
+    training = np.asarray([[0.0, np.nan], [2.0, 4.0]])
+    evaluation = np.asarray([[100.0, np.nan]])
+
+    transformed_training = transformer.fit_transform(training)
+    transformed_evaluation = transformer.transform(evaluation)
+
+    assert resolved == {"imputation": "mean", "scaling": "standard"}
+    assert transformer.named_steps["imputer"].statistics_.tolist() == [1.0, 4.0]
+    assert transformer.named_steps["scaler"].mean_.tolist() == [1.0, 4.0]
+    assert transformed_training[:, 0].tolist() == [-1.0, 1.0]
+    assert transformed_evaluation[0, 0] == 99.0
+    assert transformed_evaluation[0, 1] == 0.0
+
+
+def test_classifier_allowlist_resolves_deterministic_probabilistic_estimators() -> None:
+    logistic_spec = _classifier_spec(
+        {"kind": "logistic_regression", "max_iter": 321, "c": 0.25}, 17
+    )
+    logistic = _classifier_from_spec(logistic_spec)
+    assert logistic.max_iter == 321
+    assert logistic.C == 0.25
+    assert logistic.random_state == 17
+
+    forest_spec = _classifier_spec(
+        {"kind": "random_forest", "n_estimators": 13, "max_depth": 4}, 23
+    )
+    forest = _classifier_from_spec(forest_spec)
+    assert forest.n_estimators == 13
+    assert forest.max_depth == 4
+    assert forest.random_state == 23
+    assert forest.n_jobs == 1
+    assert callable(forest.predict_proba)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"kind": "arbitrary.import.Classifier"},
+        {"kind": "logistic_regression", "c": 0},
+        {"kind": "random_forest", "n_estimators": 0},
+        {"kind": "random_forest", "max_depth": 0},
+        {"kind": "logistic_regression", "unexpected": True},
+    ],
+)
+def test_classifier_allowlist_rejects_unsupported_or_invalid_config(
+    config: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        _classifier_spec(config, 0)
 
 
 def _install_quapy(monkeypatch: object) -> None:
@@ -369,6 +431,94 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
         client.get(f"/api/v1/artifacts/{evaluation_node['output_artifact_ids'][0]}/download").data
     )
     assert math.isclose(lab_evaluation["value"], direct_mae, rel_tol=1e-12, abs_tol=1e-12)
+
+    graph["nodes"].append(
+        {
+            "id": "preprocessing",
+            "type": "preprocessing",
+            "version": 1,
+            "config": {"imputation": "none", "scaling": "standard"},
+        }
+    )
+    graph["edges"] = [
+        edge for edge in graph["edges"] if edge["id"] not in {"split-acc", "split-evaluation"}
+    ] + [
+        {
+            "id": "split-preprocessing-train",
+            "source": "split",
+            "source_port": "train",
+            "target": "preprocessing",
+            "target_port": "train",
+        },
+        {
+            "id": "split-preprocessing-test",
+            "source": "split",
+            "source_port": "test",
+            "target": "preprocessing",
+            "target_port": "test",
+        },
+        {
+            "id": "preprocessing-acc",
+            "source": "preprocessing",
+            "source_port": "train",
+            "target": "acc",
+            "target_port": "train",
+        },
+        {
+            "id": "preprocessing-evaluation",
+            "source": "preprocessing",
+            "source_port": "test",
+            "target": "evaluation",
+            "target_port": "test",
+        },
+    ]
+    classifier_node = next(node for node in graph["nodes"] if node["type"] == "classifier")
+    classifier_node["config"] = {
+        "kind": "random_forest",
+        "n_estimators": 11,
+        "max_depth": 3,
+    }
+    preprocessing_workflow = client.post(
+        f"/api/v1/projects/{project_id}/workflows",
+        json={"name": "Train-only preprocessing", "graph": graph},
+    ).get_json()
+    preprocessing_run = client.post(
+        f"/api/v1/projects/{project_id}/runs",
+        json={"workflow_revision_id": preprocessing_workflow["draft_revision_id"], "seed": 7},
+    ).get_json()
+    assert worker.run_once()
+    preprocessing_result = client.get(f"/api/v1/runs/{preprocessing_run['id']}").get_json()
+    assert preprocessing_result["status"] == "succeeded", preprocessing_result
+    preprocessing_nodes = client.get(f"/api/v1/runs/{preprocessing_run['id']}/nodes").get_json()[
+        "items"
+    ]
+    preprocessing = next(
+        node for node in preprocessing_nodes if node["node_type"] == "preprocessing"
+    )
+    classifier_result = next(
+        node for node in preprocessing_nodes if node["node_type"] == "classifier"
+    )
+    classifier_spec = json.loads(
+        client.get(
+            f"/api/v1/artifacts/{classifier_result['output_artifact_ids'][0]}/download"
+        ).data
+    )
+    assert classifier_spec == {
+        "kind": "random_forest",
+        "max_depth": 3,
+        "n_estimators": 11,
+        "seed": 7,
+    }
+    transformer_id = preprocessing["output_artifact_ids"][2]
+    transformer_metadata = client.get(f"/api/v1/artifacts/{transformer_id}").get_json()
+    assert transformer_metadata["serialization"]["fit_scope"] == "train_only"
+    fitted_transformer = pickle.loads(
+        client.get(f"/api/v1/artifacts/{transformer_id}/download").data
+    )
+    training_mean = float(full.instances[split_manifest["train_indices"]].mean(axis=0)[0])
+    assert fitted_transformer.named_steps["scaler"].mean_[0] == training_mean
+    full_mean = float(full.instances.mean(axis=0)[0])
+    assert fitted_transformer.named_steps["scaler"].mean_[0] != full_mean
 
     graph["nodes"] = [node for node in graph["nodes"] if node["type"] != "evaluation"] + [
         {

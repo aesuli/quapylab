@@ -1,3 +1,5 @@
+import pytest
+
 from quapylab.app import create_app
 
 
@@ -5,7 +7,12 @@ def workflow() -> dict[str, object]:
     return {
         "schema_version": 1,
         "nodes": [
-            {"id": "dataset", "type": "dataset", "version": 1},
+            {
+                "id": "dataset",
+                "type": "dataset",
+                "version": 1,
+                "config": {"dataset_version_id": "00000000-0000-0000-0000-000000000001"},
+            },
             {"id": "split", "type": "split", "version": 1},
             {"id": "classifier", "type": "classifier", "version": 1},
             {"id": "acc", "type": "acc", "version": 1},
@@ -96,3 +103,30 @@ def test_cycles_are_rejected_before_compilation() -> None:
     response = client.post("/api/v1/workflows/validate", json=payload)
     assert response.status_code == 422
     assert response.get_json()["error"]["code"] == "incompatible_ports"
+
+
+@pytest.mark.parametrize(
+    ("node_id", "config", "field", "reason"),
+    [
+        ("classifier", {"kind": "module.CustomClassifier"}, "kind", "not_allowlisted"),
+        ("classifier", {"kind": "logistic_regression", "c": 0}, "c", "below_exclusive_minimum"),
+        ("split", {"train_proportion": 1.0}, "train_proportion", "above_maximum"),
+        ("classifier", {"unknown": True}, "unknown", "unsupported"),
+    ],
+)
+def test_node_configuration_is_rejected_before_execution(
+    node_id: str, config: dict[str, object], field: str, reason: str
+) -> None:
+    payload = workflow()
+    nodes = payload["nodes"]
+    assert isinstance(nodes, list)
+    next(node for node in nodes if node["id"] == node_id)["config"] = config
+
+    response = (
+        create_app({"TESTING": True}).test_client().post("/api/v1/workflows/validate", json=payload)
+    )
+
+    assert response.status_code == 422
+    error = response.get_json()["error"]
+    assert error["code"] == "invalid_node_config"
+    assert {"node_id": node_id, "field": field, "reason": reason} in error["details"]

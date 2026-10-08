@@ -1,6 +1,7 @@
 """Authoritative graph validation and deterministic topological compilation."""
 
 from dataclasses import dataclass
+from typing import Any
 
 from quapylab.nodes.registry import NodeDefinition, NodeRegistry, PortDefinition
 from quapylab.workflow.schemas import WorkflowSpec
@@ -39,6 +40,56 @@ def _definition(
     return definition
 
 
+def _matches_type(value: Any, expected: str) -> bool:
+    return {
+        "string": lambda: isinstance(value, str),
+        "integer": lambda: isinstance(value, int) and not isinstance(value, bool),
+        "number": lambda: isinstance(value, (int, float)) and not isinstance(value, bool),
+        "boolean": lambda: isinstance(value, bool),
+        "array": lambda: isinstance(value, list),
+        "object": lambda: isinstance(value, dict),
+        "null": lambda: value is None,
+    }.get(expected, lambda: True)()
+
+
+def _validate_node_config(node_id: str, config: dict[str, Any], definition: NodeDefinition) -> None:
+    schema = definition.config_schema or {"type": "object", "additionalProperties": False}
+    properties = schema.get("properties", {})
+    details: list[dict[str, str]] = []
+    if schema.get("additionalProperties") is False:
+        for name in sorted(set(config) - set(properties)):
+            details.append({"node_id": node_id, "field": name, "reason": "unsupported"})
+    for name, value in config.items():
+        property_schema = properties.get(name)
+        if not isinstance(property_schema, dict):
+            continue
+        expected = property_schema.get("type")
+        expected_types = expected if isinstance(expected, list) else [expected]
+        if expected and not any(
+            isinstance(item, str) and _matches_type(value, item) for item in expected_types
+        ):
+            details.append({"node_id": node_id, "field": name, "reason": "wrong_type"})
+            continue
+        if "enum" in property_schema and value not in property_schema["enum"]:
+            details.append({"node_id": node_id, "field": name, "reason": "not_allowlisted"})
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in property_schema and value < property_schema["minimum"]:
+                details.append({"node_id": node_id, "field": name, "reason": "below_minimum"})
+            if "maximum" in property_schema and value > property_schema["maximum"]:
+                details.append({"node_id": node_id, "field": name, "reason": "above_maximum"})
+            if (
+                "exclusiveMinimum" in property_schema
+                and value <= property_schema["exclusiveMinimum"]
+            ):
+                details.append(
+                    {"node_id": node_id, "field": name, "reason": "below_exclusive_minimum"}
+                )
+    if details:
+        raise GraphValidationError(
+            "invalid_node_config", "Workflow contains invalid node configuration.", details
+        )
+
+
 def validate_workflow(workflow: WorkflowSpec, registry: NodeRegistry) -> GraphCompilation:
     node_map = {node.id: node for node in workflow.nodes}
     if len(node_map) != len(workflow.nodes):
@@ -46,6 +97,8 @@ def validate_workflow(workflow: WorkflowSpec, registry: NodeRegistry) -> GraphCo
     definitions = {
         node.id: _definition(registry, node.type, node.version, node.id) for node in workflow.nodes
     }
+    for node in workflow.nodes:
+        _validate_node_config(node.id, node.config, definitions[node.id])
     edge_ids = {edge.id for edge in workflow.edges}
     if len(edge_ids) != len(workflow.edges):
         raise GraphValidationError("duplicate_edge_id", "Workflow edge IDs must be unique.", [])

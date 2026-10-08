@@ -30,6 +30,7 @@ _MATERIALIZATION_MEDIA_TYPE = "application/vnd.quapylab.quapy-materialization+pi
 _QUANTIFIER_MEDIA_TYPE = "application/vnd.quapylab.quapy-quantifier+pickle"
 _SPLIT_MEDIA_TYPE = "application/vnd.quapylab.dataset-split+json"
 _PROTOCOL_MEDIA_TYPE = "application/vnd.quapylab.protocol+json"
+_TRANSFORMER_MEDIA_TYPE = "application/vnd.quapylab.sklearn-transformer+pickle"
 
 
 class RuntimeNodeExecutor:
@@ -41,6 +42,7 @@ class RuntimeNodeExecutor:
             ("dataset", 1): self._dataset,
             ("split", 1): self._split,
             ("classifier", 1): self._classifier,
+            ("preprocessing", 1): self._preprocessing,
             ("acc", 1): self._acc,
             ("pcc", 1): self._pcc,
             ("pacc", 1): self._pacc,
@@ -112,12 +114,9 @@ class RuntimeNodeExecutor:
         _log(node, "split.completed", "Recorded the deterministic training and evaluation split.")
 
     def _classifier(self, session: Session, run: Run, node: NodeRun) -> None:
-        max_iter = _config(node).get("max_iter", 1000)
-        seed = _config(node).get("seed", run.seed)
-        if not isinstance(max_iter, int) or max_iter < 1 or not isinstance(seed, int):
-            raise ValueError("Classifier max_iter and seed must be integers.")
+        spec = _classifier_spec(_config(node), run.seed)
         content = json.dumps(
-            {"kind": "logistic_regression", "max_iter": max_iter, "seed": seed},
+            spec,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -132,7 +131,51 @@ class RuntimeNodeExecutor:
             serialization={"format": "json", "schema_version": 1},
         )
         node.output_artifact_ids = [artifact.id]
-        _log(node, "classifier.resolved", "Resolved the configured logistic-regression classifier.")
+        _log(node, "classifier.resolved", f"Resolved the {spec['kind']} classifier.")
+
+    def _preprocessing(self, session: Session, run: Run, node: NodeRun) -> None:
+        training = self._collection_input(session, run, node, "train")
+        test = self._collection_input(session, run, node, "test")
+        transformer, resolved = _tabular_transformer(_config(node))
+        try:
+            transformed_train = transformer.fit_transform(training.instances)
+            transformed_test = transformer.transform(test.instances)
+            from quapy.data.base import LabelledCollection  # type: ignore[import-untyped]
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "Tabular preprocessing requires compatible two-dimensional numeric inputs."
+            ) from error
+        training_output = LabelledCollection(
+            transformed_train, training.labels, classes=training.classes_
+        )
+        test_output = LabelledCollection(transformed_test, test.labels, classes=test.classes_)
+        train_artifact = self._store_materialization(session, run, node, training_output)
+        test_artifact = self._store_materialization(session, run, node, test_output)
+        transformer_artifact = self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="fitted-tabular-transformer",
+            media_type=_TRANSFORMER_MEDIA_TYPE,
+            content=pickle.dumps(transformer, protocol=pickle.HIGHEST_PROTOCOL),
+            serialization={
+                "format": "pickle",
+                "trusted_producer": "workflow-runtime",
+                "resolved_config": resolved,
+                "fit_scope": "train_only",
+            },
+        )
+        node.output_artifact_ids = [
+            train_artifact.id,
+            test_artifact.id,
+            transformer_artifact.id,
+        ]
+        _log(
+            node,
+            "preprocessing.completed",
+            "Fitted preprocessing on training data and transformed both partitions.",
+        )
 
     def _acc(self, session: Session, run: Run, node: NodeRun) -> None:
         self._fit_quantifier(session, run, node, "ACC")
@@ -543,7 +586,7 @@ def _csv_labelled_collection(content: bytes, version: DatasetVersion, config: Da
         raise ValueError("Dataset labels must be present for every row.")
     try:
         import numpy as np
-        from quapy.data.base import LabelledCollection  # type: ignore[import-untyped]
+        from quapy.data.base import LabelledCollection
     except ImportError as error:  # pragma: no cover - supplied by the QuaPy installation
         raise RuntimeError("QuaPy and NumPy are required to materialize a CSV dataset.") from error
     if config.representation == "text":
@@ -567,7 +610,10 @@ def _csv_labelled_collection(content: bytes, version: DatasetVersion, config: Da
     ):
         raise ValueError("Tabular datasets require selected non-label feature columns.")
     try:
-        matrix = [[float(row[feature]) for feature in features] for row in rows]
+        matrix = [
+            [float(row[feature]) if row[feature] != "" else np.nan for feature in features]
+            for row in rows
+        ]
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
             "Tabular execution supports complete numeric feature columns only."
@@ -724,16 +770,106 @@ def _input_source(session: Session, run: Run, node: NodeRun, port: str) -> tuple
 
 
 def _classifier_from_spec(spec: dict[str, Any]) -> Any:
-    if spec.get("kind") != "logistic_regression":
-        raise ValueError("Classifier specification is unsupported.")
-    max_iter, seed = spec.get("max_iter"), spec.get("seed")
-    if not isinstance(max_iter, int) or max_iter < 1 or not isinstance(seed, int):
-        raise ValueError("Classifier specification is malformed.")
+    kind = spec.get("kind")
     try:
+        from sklearn.ensemble import RandomForestClassifier  # type: ignore[import-untyped]
         from sklearn.linear_model import LogisticRegression  # type: ignore[import-untyped]
     except ImportError as error:  # pragma: no cover - QuaPy installation supplies scikit-learn
         raise RuntimeError("scikit-learn is required to execute classifier nodes.") from error
-    return LogisticRegression(max_iter=max_iter, random_state=seed)
+    if kind == "logistic_regression":
+        return LogisticRegression(C=spec["c"], max_iter=spec["max_iter"], random_state=spec["seed"])
+    if kind == "random_forest":
+        return RandomForestClassifier(
+            n_estimators=spec["n_estimators"],
+            max_depth=spec["max_depth"],
+            random_state=spec["seed"],
+            n_jobs=1,
+        )
+    raise ValueError("Classifier specification is unsupported.")
+
+
+def _classifier_spec(config: dict[str, Any], run_seed: int) -> dict[str, Any]:
+    allowed = {"kind", "max_iter", "c", "n_estimators", "max_depth", "seed"}
+    if set(config) - allowed:
+        raise ValueError("Classifier node config contains unsupported settings.")
+    kind = config.get("kind", "logistic_regression")
+    seed = config.get("seed", run_seed)
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("Classifier seed must be an integer.")
+    if kind == "logistic_regression":
+        max_iter = config.get("max_iter", 1000)
+        regularization = config.get("c", 1.0)
+        if (
+            not isinstance(max_iter, int)
+            or isinstance(max_iter, bool)
+            or max_iter < 1
+            or not isinstance(regularization, (int, float))
+            or isinstance(regularization, bool)
+            or regularization <= 0
+        ):
+            raise ValueError("Logistic regression requires max_iter >= 1 and C > 0.")
+        return {
+            "kind": kind,
+            "max_iter": max_iter,
+            "c": float(regularization),
+            "seed": seed,
+        }
+    if kind == "random_forest":
+        n_estimators = config.get("n_estimators", 200)
+        max_depth = config.get("max_depth")
+        if (
+            not isinstance(n_estimators, int)
+            or isinstance(n_estimators, bool)
+            or n_estimators < 1
+            or (
+                max_depth is not None
+                and (not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 1)
+            )
+        ):
+            raise ValueError("Random forest requires n_estimators >= 1 and max_depth >= 1.")
+        return {
+            "kind": kind,
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "seed": seed,
+        }
+    raise ValueError("Classifier kind is not allow-listed.")
+
+
+def _tabular_transformer(config: dict[str, Any]) -> tuple[Any, dict[str, str]]:
+    allowed = {"imputation", "scaling"}
+    if set(config) - allowed:
+        raise ValueError("Preprocessing node config contains unsupported settings.")
+    imputation = config.get("imputation", "none")
+    scaling = config.get("scaling", "standard")
+    if imputation not in {"none", "mean", "median", "most_frequent"}:
+        raise ValueError("Preprocessing imputation strategy is unsupported.")
+    if scaling not in {"none", "standard", "minmax", "robust"}:
+        raise ValueError("Preprocessing scaling strategy is unsupported.")
+    try:
+        from sklearn.impute import SimpleImputer  # type: ignore[import-untyped]
+        from sklearn.pipeline import Pipeline  # type: ignore[import-untyped]
+        from sklearn.preprocessing import (  # type: ignore[import-untyped]
+            FunctionTransformer,
+            MinMaxScaler,
+            RobustScaler,
+            StandardScaler,
+        )
+    except ImportError as error:  # pragma: no cover - supplied by QuaPy
+        raise RuntimeError("scikit-learn is required for preprocessing.") from error
+    steps: list[tuple[str, Any]] = []
+    if imputation != "none":
+        steps.append(("imputer", SimpleImputer(strategy=imputation)))
+    scaler_types = {
+        "standard": StandardScaler,
+        "minmax": MinMaxScaler,
+        "robust": RobustScaler,
+    }
+    if scaling != "none":
+        steps.append(("scaler", scaler_types[scaling]()))
+    if not steps:
+        steps.append(("identity", FunctionTransformer(validate=True)))
+    return Pipeline(steps), {"imputation": imputation, "scaling": scaling}
 
 
 def _report_html(evaluation: dict[str, Any], *, run: Run, nodes: list[NodeRun]) -> str:

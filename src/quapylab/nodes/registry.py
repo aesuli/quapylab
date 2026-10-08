@@ -116,11 +116,59 @@ def default_registry() -> NodeRegistry:
                 config_schema={
                     "type": "object",
                     "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["logistic_regression", "random_forest"],
+                            "default": "logistic_regression",
+                        },
                         "max_iter": {"type": "integer", "minimum": 1, "default": 1000},
+                        "c": {"type": "number", "exclusiveMinimum": 0, "default": 1.0},
+                        "n_estimators": {"type": "integer", "minimum": 1, "default": 200},
+                        "max_depth": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "default": None,
+                        },
                         "seed": {"type": "integer"},
                     },
                     "additionalProperties": False,
                 },
+                capabilities={
+                    "allowlist": ["logistic_regression", "random_forest"],
+                    "predict_proba": True,
+                },
+            ),
+            NodeDefinition(
+                "preprocessing",
+                1,
+                "Tabular preprocessing",
+                "preprocessing",
+                inputs=(
+                    PortDefinition("train", labelled),
+                    PortDefinition("test", labelled),
+                ),
+                outputs=(
+                    PortDefinition("train", labelled),
+                    PortDefinition("test", labelled),
+                    PortDefinition("transformer", "transformer"),
+                ),
+                config_schema={
+                    "type": "object",
+                    "properties": {
+                        "imputation": {
+                            "type": "string",
+                            "enum": ["none", "mean", "median", "most_frequent"],
+                            "default": "none",
+                        },
+                        "scaling": {
+                            "type": "string",
+                            "enum": ["none", "standard", "minmax", "robust"],
+                            "default": "standard",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                capabilities={"representation": "dense_tabular", "fit_scope": "train_only"},
             ),
             NodeDefinition(
                 "acc",

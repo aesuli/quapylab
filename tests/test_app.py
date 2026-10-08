@@ -31,9 +31,7 @@ def test_version_describes_internal_api() -> None:
     }
 
 
-def test_native_bridge_saves_an_artifact_through_the_desktop_dialog(
-    tmp_path, monkeypatch
-) -> None:
+def test_native_bridge_saves_an_artifact_through_the_desktop_dialog(tmp_path, monkeypatch) -> None:
     destination = tmp_path / "evaluation.json"
     webview = ModuleType("webview")
     webview.SAVE_DIALOG = 30  # type: ignore[attr-defined]
@@ -50,11 +48,7 @@ def test_native_bridge_saves_an_artifact_through_the_desktop_dialog(
             )
 
     application = SimpleNamespace(test_client=lambda: Client())
-    window = SimpleNamespace(
-        create_file_dialog=lambda dialog, save_filename: (
-            str(destination),
-        )
-    )
+    window = SimpleNamespace(create_file_dialog=lambda dialog, save_filename: (str(destination),))
     bridge = NativeDesktopBridge(application)
     bridge.bind_window(window)
 
@@ -114,6 +108,7 @@ def test_node_types_are_published_by_the_server() -> None:
         "npp",
         "pacc",
         "pcc",
+        "preprocessing",
         "protocol_evaluation",
         "report",
         "split",
