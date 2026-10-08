@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -52,7 +53,10 @@ class GroupService:
             session.execute(
                 select(Group, GroupMembership)
                 .join(GroupMembership, GroupMembership.group_id == Group.id)
-                .where(GroupMembership.user_id == str(actor.user_id))
+                .where(
+                    GroupMembership.user_id == str(actor.user_id),
+                    Group.deleted_at.is_(None),
+                )
                 .order_by(Group.name)
             )
         )
@@ -170,9 +174,31 @@ class GroupService:
         )
         return project
 
+    def update_group(
+        self, session: Session, *, actor: ActorContext, group_id: str, name: str
+    ) -> Group:
+        group = self._managed_group(session, group_id)
+        self._require(session, actor, group_id, Permission.MANAGE_GROUP, "group.update")
+        if not name.strip():
+            raise ValueError("Group name is required.")
+        group.name = name.strip()
+        group.version += 1
+        self._audit(session, actor, group_id, "group.update", {"name": group.name})
+        return group
+
+    def delete_group(self, session: Session, *, actor: ActorContext, group_id: str) -> None:
+        group = self._managed_group(session, group_id)
+        membership = self._membership(session, group_id, str(actor.user_id))
+        if MembershipRole(membership.role) is not MembershipRole.OWNER:
+            self._audit(session, actor, group_id, "group.delete", {}, outcome="denied")
+            raise AuthorizationError("Resource not found.")
+        group.deleted_at = datetime.now(UTC)
+        group.version += 1
+        self._audit(session, actor, group_id, "group.delete", {})
+
     def _managed_group(self, session: Session, group_id: str) -> Group:
         group = session.get(Group, group_id)
-        if group is None:
+        if group is None or group.deleted_at is not None:
             raise AuthorizationError("Resource not found.")
         if group.type == GroupType.PERSONAL:
             raise ValueError("Personal workspaces cannot be managed as shared groups.")

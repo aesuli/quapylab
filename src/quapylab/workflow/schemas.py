@@ -5,6 +5,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class WorkflowPosition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    x: float
+    y: float
+
+
 class WorkflowNode(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -12,6 +19,7 @@ class WorkflowNode(BaseModel):
     type: str = Field(min_length=1, max_length=128)
     version: int = Field(ge=1)
     config: dict[str, Any] = Field(default_factory=dict)
+    position: WorkflowPosition | None = None
 
 
 class WorkflowEdge(BaseModel):

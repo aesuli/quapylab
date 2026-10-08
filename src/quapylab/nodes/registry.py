@@ -20,6 +20,7 @@ class NodeDefinition:
     inputs: tuple[PortDefinition, ...] = ()
     outputs: tuple[PortDefinition, ...] = ()
     config_schema: dict[str, Any] | None = None
+    capabilities: dict[str, Any] | None = None
 
     def as_public_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +32,7 @@ class NodeDefinition:
             "outputs": _public_ports(self.outputs),
             "config_schema": self.config_schema
             or {"type": "object", "additionalProperties": False},
+            "capabilities": self.capabilities or {},
         }
 
 
@@ -130,6 +132,32 @@ def default_registry() -> NodeRegistry:
                     PortDefinition("classifier", "classifier_spec"),
                 ),
                 outputs=(PortDefinition("quantifier", "fitted_quantifier"),),
+                capabilities={"class_cardinality": "binary_or_multiclass"},
+            ),
+            *(
+                NodeDefinition(
+                    method,
+                    1,
+                    title,
+                    "quantifier",
+                    inputs=(
+                        PortDefinition("train", labelled),
+                        PortDefinition("classifier", "classifier_spec"),
+                    ),
+                    outputs=(PortDefinition("quantifier", "fitted_quantifier"),),
+                    capabilities={
+                        "class_cardinality": cardinality,
+                        "requires_probabilistic_classifier": probabilistic,
+                        "optional_dependency": None,
+                    },
+                )
+                for method, title, cardinality, probabilistic in (
+                    ("pcc", "PCC", "binary_or_multiclass", True),
+                    ("pacc", "PACC", "binary_or_multiclass", True),
+                    ("emq", "EMQ", "binary_or_multiclass", True),
+                    ("hdy", "HDy", "binary", True),
+                    ("dmy", "DMy", "binary_or_multiclass", True),
+                )
             ),
             NodeDefinition(
                 "evaluation",
@@ -139,6 +167,52 @@ def default_registry() -> NodeRegistry:
                 inputs=(
                     PortDefinition("quantifier", "fitted_quantifier"),
                     PortDefinition("test", labelled),
+                ),
+                outputs=(PortDefinition("report", "evaluation_report"),),
+            ),
+            NodeDefinition(
+                "app",
+                1,
+                "Artificial Prevalence Protocol",
+                "protocol",
+                inputs=(PortDefinition("collection", labelled),),
+                outputs=(PortDefinition("protocol", "protocol"),),
+                config_schema={
+                    "type": "object",
+                    "properties": {
+                        "sample_size": {"type": "integer", "minimum": 1, "default": 100},
+                        "n_prevalences": {"type": "integer", "minimum": 2, "default": 21},
+                        "repeats": {"type": "integer", "minimum": 1, "default": 1},
+                        "seed": {"type": "integer"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            NodeDefinition(
+                "npp",
+                1,
+                "Natural Prevalence Protocol",
+                "protocol",
+                inputs=(PortDefinition("collection", labelled),),
+                outputs=(PortDefinition("protocol", "protocol"),),
+                config_schema={
+                    "type": "object",
+                    "properties": {
+                        "sample_size": {"type": "integer", "minimum": 1, "default": 100},
+                        "repeats": {"type": "integer", "minimum": 1, "default": 100},
+                        "seed": {"type": "integer"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            NodeDefinition(
+                "protocol_evaluation",
+                1,
+                "Protocol Evaluation",
+                "evaluation",
+                inputs=(
+                    PortDefinition("quantifier", "fitted_quantifier"),
+                    PortDefinition("protocol", "protocol"),
                 ),
                 outputs=(PortDefinition("report", "evaluation_report"),),
             ),

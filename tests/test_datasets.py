@@ -62,6 +62,24 @@ def test_identical_uploads_reuse_the_same_content_addressed_artifact() -> None:
     assert first["source"]["artifact_id"] == second["source"]["artifact_id"]
 
 
+def test_dataset_can_be_deleted_without_destroying_its_immutable_version() -> None:
+    client = create_app({"TESTING": True}).test_client()
+    group_id = str(desktop_actor().group_id)
+    project_id = client.post(
+        f"/api/v1/groups/{group_id}/projects", json={"name": "Experiment"}
+    ).get_json()["id"]
+    version = client.post(
+        f"/api/v1/projects/{project_id}/datasets",
+        data={"name": "Temporary", "file": (BytesIO(b"value\n1\n"), "data.csv")},
+    ).get_json()
+    dataset = client.get(f"/api/v1/projects/{project_id}/datasets").get_json()["items"][0]
+
+    assert client.delete(f"/api/v1/datasets/{dataset['id']}").status_code == 204
+    assert client.get(f"/api/v1/projects/{project_id}/datasets").get_json()["items"] == []
+    assert client.get(f"/api/v1/dataset-versions/{version['id']}").status_code == 404
+    assert client.delete(f"/api/v1/datasets/{dataset['id']}").status_code == 404
+
+
 def test_artifact_download_does_not_disclose_another_groups_content() -> None:
     application = create_app({"TESTING": True, "QUAPYLAB_MODE": "web"})
     with application.extensions["quapylab.database"].transaction() as session:

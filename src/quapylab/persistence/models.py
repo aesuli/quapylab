@@ -62,6 +62,7 @@ class Group(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -114,6 +115,7 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -125,6 +127,7 @@ class Workflow(Base):
     name: Mapped[str] = mapped_column(String(256))
     draft_revision_id: Mapped[str | None] = mapped_column(ForeignKey("workflow_revisions.id"))
     version: Mapped[int] = mapped_column(Integer, default=1)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class WorkflowRevision(Base):
@@ -148,6 +151,7 @@ class Dataset(Base):
     is_labelled: Mapped[bool] = mapped_column()
     current_version_id: Mapped[str | None] = mapped_column(ForeignKey("dataset_versions.id"))
     version: Mapped[int] = mapped_column(Integer, default=1)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class DatasetVersion(Base):

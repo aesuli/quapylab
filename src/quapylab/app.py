@@ -1,6 +1,9 @@
 """Flask application factory for web, standalone, and desktop modes."""
 
+import csv
 import hmac
+import io
+import json
 import re
 import tempfile
 from collections.abc import Mapping
@@ -264,6 +267,21 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
             session.flush()
             return jsonify(group_json(group, None)), 201
 
+    @app.route("/api/v1/groups/<group_id>", methods=["PATCH", "DELETE"])
+    def group(group_id: str) -> tuple[Any, int]:
+        if g.actor.deployment_mode == "desktop":
+            raise AuthorizationError("Resource not found.")
+        service: GroupService = app.extensions["quapylab.groups"]
+        with database.transaction() as session:
+            if request.method == "DELETE":
+                service.delete_group(session, actor=g.actor, group_id=group_id)
+                return "", 204
+            name = request_json().get("name")
+            if not isinstance(name, str):
+                raise ValueError("Group name is required.")
+            item = service.update_group(session, actor=g.actor, group_id=group_id, name=name)
+            return jsonify(group_json(item, None)), 200
+
     @app.route("/api/v1/groups/<group_id>/members", methods=["GET", "POST"])
     def group_members(group_id: str) -> tuple[Any, int]:
         if g.actor.deployment_mode == "desktop":
@@ -347,13 +365,28 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
             session.flush()
             return jsonify(project_json(project)), 201
 
-    @app.get("/api/v1/projects/<project_id>")
+    @app.route("/api/v1/projects/<project_id>", methods=["GET", "PATCH", "DELETE"])
     def project(project_id: str) -> tuple[Any, int]:
         service: ProjectService = app.extensions["quapylab.projects"]
         with database.transaction() as session:
-            return jsonify(
-                project_json(service.get_project(session, actor=g.actor, project_id=project_id))
-            ), 200
+            if request.method == "DELETE":
+                service.delete_project(session, actor=g.actor, project_id=project_id)
+                return "", 204
+            if request.method == "PATCH":
+                payload = request_json()
+                name, description = payload.get("name"), payload.get("description", "")
+                if not isinstance(name, str) or not isinstance(description, str):
+                    raise ValueError("Project name and description must be strings.")
+                item = service.update_project(
+                    session,
+                    actor=g.actor,
+                    project_id=project_id,
+                    name=name,
+                    description=description,
+                )
+                return jsonify(project_json(item)), 200
+            item = service.get_project(session, actor=g.actor, project_id=project_id)
+            return jsonify(project_json(item)), 200
 
     @app.route("/api/v1/projects/<project_id>/datasets", methods=["GET", "POST"])
     def datasets(project_id: str) -> tuple[Any, int]:
@@ -399,6 +432,13 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 )
             ), 200
 
+    @app.delete("/api/v1/datasets/<dataset_id>")
+    def delete_dataset(dataset_id: str) -> tuple[Any, int]:
+        service: DatasetService = app.extensions["quapylab.datasets"]
+        with database.transaction() as session:
+            service.delete(session, actor=g.actor, dataset_id=dataset_id)
+        return "", 204
+
     @app.get("/api/v1/artifacts/<artifact_id>")
     def artifact(artifact_id: str) -> tuple[Any, int]:
         service: ArtifactService = app.extensions["quapylab.artifacts"]
@@ -412,7 +452,63 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
         with database.transaction() as session:
             item, content = service.read(session, actor=g.actor, artifact_id=artifact_id)
         response = Response(content, mimetype=item.media_type)
-        response.headers["Content-Disposition"] = f'attachment; filename="{item.sha256}"'
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="{_artifact_filename(item)}"'
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @app.get("/api/v1/artifacts/<artifact_id>/evaluation.csv")
+    def export_evaluation_csv(artifact_id: str) -> Response:
+        service: ArtifactService = app.extensions["quapylab.artifacts"]
+        with database.transaction() as session:
+            item, content = service.read(session, actor=g.actor, artifact_id=artifact_id)
+        if (
+            item.kind != "evaluation-result"
+            or item.media_type != "application/vnd.quapylab.evaluation-result+json"
+        ):
+            raise ValueError("Artifact is not an evaluation result.")
+        evaluation = json.loads(content)
+        output = io.StringIO(newline="")
+        writer = csv.writer(output, lineterminator="\r\n")
+        classes = [_csv_safe(value) for value in evaluation.get("classes", [])]
+        samples = evaluation.get("samples")
+        if not isinstance(samples, list):
+            samples = [
+                {
+                    "sample_id": "sample-000000",
+                    "true_prevalence": evaluation.get("true_prevalence", []),
+                    "estimated_prevalence": evaluation.get("estimated_prevalence", []),
+                    "metrics": evaluation.get("metrics", {"ae": evaluation.get("value")}),
+                }
+            ]
+        metric_names = sorted(
+            {
+                name
+                for sample in samples
+                if isinstance(sample, dict) and isinstance(sample.get("metrics"), dict)
+                for name in sample["metrics"]
+            }
+        )
+        writer.writerow(
+            ["sample_id"]
+            + [f"true_{value}" for value in classes]
+            + [f"estimated_{value}" for value in classes]
+            + metric_names
+        )
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            writer.writerow(
+                [_csv_safe(sample.get("sample_id", ""))]
+                + sample.get("true_prevalence", [])
+                + sample.get("estimated_prevalence", [])
+                + [sample.get("metrics", {}).get(name, "") for name in metric_names]
+            )
+        response = Response(output.getvalue(), mimetype="text/csv")
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="evaluation-{item.sha256[:12]}.csv"'
+        )
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
@@ -464,9 +560,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
         service: RunService = app.extensions["quapylab.runs"]
         if request.method == "GET":
             with database.transaction() as session:
-                runs = service.list_for_project(
-                    session, actor=g.actor, project_id=project_id
-                )
+                runs = service.list_for_project(session, actor=g.actor, project_id=project_id)
                 return jsonify({"items": [run_json(item) for item in runs]}), 200
         payload = request_json()
         revision_id = payload.get("workflow_revision_id")
@@ -525,7 +619,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 actor=g.actor,
                 project_id=project_id,
                 name=name,
-                graph=workflow.model_dump(mode="json"),
+                graph=workflow.model_dump(mode="json", exclude_none=True),
             )
             session.flush()
             return jsonify(workflow_json(item)), 201
@@ -545,13 +639,36 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 }
             ), 200
 
-    @app.get("/api/v1/workflows/<workflow_id>")
+    @app.route("/api/v1/workflows/<workflow_id>", methods=["GET", "PATCH", "DELETE"])
     def workflow(workflow_id: str) -> tuple[Any, int]:
         service: ProjectService = app.extensions["quapylab.projects"]
         with database.transaction() as session:
-            return jsonify(
-                workflow_json(service.get_workflow(session, actor=g.actor, workflow_id=workflow_id))
-            ), 200
+            if request.method == "DELETE":
+                service.delete_workflow(session, actor=g.actor, workflow_id=workflow_id)
+                return "", 204
+            if request.method == "PATCH":
+                name = request_json().get("name")
+                if not isinstance(name, str):
+                    raise ValueError("Workflow name is required.")
+                item = service.update_workflow(
+                    session, actor=g.actor, workflow_id=workflow_id, name=name
+                )
+                return jsonify(workflow_json(item)), 200
+            item = service.get_workflow(session, actor=g.actor, workflow_id=workflow_id)
+            return jsonify(workflow_json(item)), 200
+
+    @app.post("/api/v1/workflows/<workflow_id>/duplicate")
+    def duplicate_workflow(workflow_id: str) -> tuple[Any, int]:
+        name = request_json().get("name")
+        if not isinstance(name, str):
+            raise ValueError("Workflow name is required.")
+        service: ProjectService = app.extensions["quapylab.projects"]
+        with database.transaction() as session:
+            item = service.duplicate_workflow(
+                session, actor=g.actor, workflow_id=workflow_id, name=name
+            )
+            session.flush()
+            return jsonify(workflow_json(item)), 201
 
     @app.post("/api/v1/workflows/<workflow_id>/revisions")
     def add_workflow_revision(workflow_id: str) -> tuple[Any, int]:
@@ -566,7 +683,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 session,
                 actor=g.actor,
                 workflow_id=workflow_id,
-                graph=workflow.model_dump(mode="json"),
+                graph=workflow.model_dump(mode="json", exclude_none=True),
             )
             return jsonify(revision_json(revision)), 201
 
@@ -611,6 +728,24 @@ def request_json() -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("Request body must be a JSON object.")
     return payload
+
+
+def _csv_safe(value: Any) -> str:
+    rendered = str(value)
+    return f"'{rendered}" if rendered.startswith(("=", "+", "-", "@")) else rendered
+
+
+def _artifact_filename(artifact: Any) -> str:
+    extension = {
+        "application/json": "json",
+        "application/vnd.quapylab.evaluation-result+json": "json",
+        "application/vnd.quapylab.dataset-split+json": "json",
+        "application/vnd.quapylab.protocol+json": "json",
+        "text/csv": "csv",
+        "text/tab-separated-values": "tsv",
+        "text/html": "html",
+    }.get(artifact.media_type, "bin")
+    return f"{artifact.kind}-{artifact.sha256[:12]}.{extension}"
 
 
 def api_error(code: str, message: str, status: int, details: Any | None = None) -> tuple[Any, int]:
@@ -719,6 +854,9 @@ def run_json(run: Any) -> dict[str, Any]:
 
 
 def node_run_json(node: Any) -> dict[str, Any]:
+    duration = None
+    if node.started_at is not None and node.ended_at is not None:
+        duration = (node.ended_at - node.started_at).total_seconds()
     return {
         "id": node.id,
         "node_id": node.node_id,
@@ -726,6 +864,9 @@ def node_run_json(node: Any) -> dict[str, Any]:
         "node_version": node.node_version,
         "state": node.state,
         "resolved_config": node.resolved_config,
+        "started_at": node.started_at.isoformat() if node.started_at else None,
+        "ended_at": node.ended_at.isoformat() if node.ended_at else None,
+        "wall_time_seconds": duration,
         "logs": node.logs,
         "error": node.error,
         "output_artifact_ids": node.output_artifact_ids,

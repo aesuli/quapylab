@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import pickle
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from quapylab.domain.actor import ActorContext
 from quapylab.persistence.models import Dataset, DatasetVersion
 from quapylab.services.artifacts import ArtifactService
+from quapylab.services.authorization import AuthorizationError
 from quapylab.services.projects import ProjectService
 
 
@@ -191,7 +193,9 @@ class DatasetService:
         self._projects.get_project(session, actor=actor, project_id=project_id)
         return list(
             session.scalars(
-                select(Dataset).where(Dataset.project_id == project_id).order_by(Dataset.name)
+                select(Dataset)
+                .where(Dataset.project_id == project_id, Dataset.deleted_at.is_(None))
+                .order_by(Dataset.name)
             )
         )
 
@@ -200,14 +204,19 @@ class DatasetService:
     ) -> DatasetVersion:
         version = session.get(DatasetVersion, version_id)
         if version is None:
-            from quapylab.services.authorization import AuthorizationError
-
             raise AuthorizationError("Resource not found.")
         dataset = session.get(Dataset, version.dataset_id)
-        if dataset is None:
-            raise AssertionError("Dataset version without dataset.")
+        if dataset is None or dataset.deleted_at is not None:
+            raise AuthorizationError("Resource not found.")
         self._projects.get_project(session, actor=actor, project_id=dataset.project_id)
         return version
+
+    def delete(self, session: Session, *, actor: ActorContext, dataset_id: str) -> None:
+        dataset = session.get(Dataset, dataset_id)
+        if dataset is None or dataset.deleted_at is not None:
+            raise AuthorizationError("Resource not found.")
+        self._projects._project_for_edit(session, actor, dataset.project_id)
+        dataset.deleted_at = datetime.now(UTC)
 
 
 def _column(name: str, rows: list[dict[str, str]]) -> dict[str, Any]:
@@ -266,9 +275,7 @@ def _load_quapy(source_id: str, dataset_name: str, options: dict[str, Any]) -> A
     return datasets.fetch_UCIMulticlassDataset(dataset_name, **options)
 
 
-def _quapy_dataset_display_name(
-    source_id: str, dataset_name: str, options: dict[str, Any]
-) -> str:
+def _quapy_dataset_display_name(source_id: str, dataset_name: str, options: dict[str, Any]) -> str:
     """Keep source variants distinguishable in project-level dataset selectors."""
     if not options:
         return f"{dataset_name} · {source_id}"

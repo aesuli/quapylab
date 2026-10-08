@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import platform
+import sys
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from sqlalchemy import select
@@ -57,7 +60,16 @@ class RunService:
             workflow_revision_id=revision.id,
             status="queued",
             seed=seed,
-            environment={"state": {"heartbeat_at": _timestamp()}},
+            environment={
+                "application": _environment_snapshot(),
+                "dataset_version_bindings": {
+                    node.id: node.config["dataset_version_id"]
+                    for node in graph.nodes
+                    if node.type == "dataset"
+                    and isinstance(node.config.get("dataset_version_id"), str)
+                },
+                "state": {"heartbeat_at": _timestamp()},
+            },
             requested_by_user_id=str(actor.user_id),
         )
         session.add(run)
@@ -169,6 +181,7 @@ class RunService:
         if run.status != "preparing":
             return False
         run.status = "running"
+        self._execution_state(run, started_at=_timestamp())
         self._heartbeat(run)
         return True
 
@@ -179,6 +192,7 @@ class RunService:
     def fail(self, session: Session, run: Run, message: str) -> None:
         run.status = "failed"
         run.error_summary = message
+        self._finish_execution(run)
         active_node = session.scalar(
             select(NodeRun).where(NodeRun.run_id == run.id, NodeRun.state == "running")
         )
@@ -195,10 +209,12 @@ class RunService:
 
     def succeed(self, session: Session, run: Run) -> None:
         run.status = "succeeded"
+        self._finish_execution(run)
         self._heartbeat(run)
 
     def finish_cancelled(self, session: Session, run: Run) -> None:
         run.status = "cancelled"
+        self._finish_execution(run)
         self._set_pending_nodes(session, run.id, "cancelled", "run.cancelled")
         self._heartbeat(run)
 
@@ -207,6 +223,7 @@ class RunService:
         for run in active:
             run.status = "interrupted"
             run.error_summary = "Worker stopped before the run completed."
+            self._finish_execution(run)
             self._set_pending_nodes(session, run.id, "skipped", "run.interrupted")
             self._heartbeat(run)
         return len(active)
@@ -228,6 +245,7 @@ class RunService:
             return
         run.status = "interrupted"
         run.error_summary = f"Worker process exited unexpectedly with code {return_code}."
+        self._finish_execution(run)
         self._set_pending_nodes(session, run.id, "skipped", "run.interrupted")
         self._heartbeat(run)
 
@@ -250,9 +268,39 @@ class RunService:
             "state": {**state, "heartbeat_at": _timestamp()},
         }
 
+    @staticmethod
+    def _execution_state(run: Run, **updates: Any) -> None:
+        execution = dict(run.environment.get("execution", {}))
+        run.environment = {**run.environment, "execution": {**execution, **updates}}
+
+    @classmethod
+    def _finish_execution(cls, run: Run) -> None:
+        ended_at = datetime.now(UTC)
+        execution = run.environment.get("execution", {})
+        started_value = execution.get("started_at") if isinstance(execution, dict) else None
+        duration = None
+        if isinstance(started_value, str):
+            duration = (ended_at - datetime.fromisoformat(started_value)).total_seconds()
+        cls._execution_state(run, ended_at=ended_at.isoformat(), wall_time_seconds=duration)
+
 
 def _timestamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _environment_snapshot() -> dict[str, Any]:
+    packages: dict[str, str | None] = {}
+    for distribution in ("quapylab", "quapy", "scikit-learn", "numpy"):
+        try:
+            packages[distribution] = version(distribution)
+        except PackageNotFoundError:
+            packages[distribution] = None
+    return {
+        "python": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "platform": sys.platform,
+        "packages": packages,
+    }
 
 
 def _log(node_id: str, level: str, event: str, message: str) -> dict[str, str]:

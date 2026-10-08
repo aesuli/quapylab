@@ -1,6 +1,7 @@
 """Focused execution coverage using a small deterministic QuaPy stand-in."""
 
 import json
+import math
 import pickle
 import sys
 from io import BytesIO
@@ -37,10 +38,14 @@ class FixtureACC:
 
 def _install_quapy(monkeypatch: object) -> None:
     quapy = ModuleType("quapy")
+    error = ModuleType("quapy.error")
     method = ModuleType("quapy.method")
     aggregative = ModuleType("quapy.method.aggregative")
     aggregative.ACC = FixtureACC  # type: ignore[attr-defined]
+    for name in ("ae", "rae", "se", "kld", "nkld", "nae", "nrae"):
+        setattr(error, name, lambda _actual, _estimated, **_kwargs: 0.0)
     monkeypatch.setitem(sys.modules, "quapy", quapy)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "quapy.error", error)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "quapy.method", method)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "quapy.method.aggregative", aggregative)  # type: ignore[attr-defined]
 
@@ -166,10 +171,18 @@ def test_runtime_executes_and_persists_a_provenanced_evaluation(monkeypatch: obj
     assert artifact["producing_node_run_id"] == evaluation["id"]
     download = client.get(f"/api/v1/artifacts/{artifact['id']}/download")
     assert json.loads(download.data)["value"] == 0.0
+    csv_export = client.get(f"/api/v1/artifacts/{artifact['id']}/evaluation.csv")
+    assert csv_export.status_code == 200
+    assert csv_export.data.startswith(
+        b"sample_id,true_negative,true_positive,estimated_negative,estimated_positive,"
+    )
+    assert b",ae," in csv_export.data.splitlines()[0] + b","
     report = next(node for node in nodes if node["node_type"] == "report")
     rendered = client.get(f"/api/v1/artifacts/{report['output_artifact_ids'][0]}/download")
     assert rendered.content_type.startswith("text/html")
     assert b"Evaluation report" in rendered.data
+    assert b"Node timings" in rendered.data
+    assert b"Reproducibility" in rendered.data
 
 
 def test_runtime_rejects_missing_dataset_configuration() -> None:
@@ -302,3 +315,132 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
     assert worker.run_once()
     result = client.get(f"/api/v1/runs/{run['id']}").get_json()
     assert result["status"] == "succeeded", result
+    assert result["environment"]["dataset_version_bindings"] == {"dataset": dataset["id"]}
+    assert result["environment"]["application"]["python"]
+    assert result["environment"]["application"]["packages"]["quapy"]
+    assert result["environment"]["execution"]["wall_time_seconds"] >= 0
+
+    nodes = client.get(f"/api/v1/runs/{run['id']}/nodes").get_json()["items"]
+    split = next(node for node in nodes if node["node_type"] == "split")
+    assert split["wall_time_seconds"] >= 0
+    manifests = [
+        json.loads(client.get(f"/api/v1/artifacts/{artifact_id}/download").data)
+        for artifact_id in split["output_artifact_ids"]
+    ]
+    assert {manifest["partition"] for manifest in manifests} == {"train", "test"}
+    for manifest in manifests:
+        assert manifest["schema_version"] == 1
+        assert manifest["source_dataset_version_id"] == dataset["id"]
+        assert manifest["seed"] == 7
+        assert manifest["strategy"] == "stratified"
+        assert set(manifest["train_indices"]).isdisjoint(manifest["test_indices"])
+        assert len(manifest["train_indices"]) + len(manifest["test_indices"]) == 24
+        assert manifest["class_distribution"]["train"] == {
+            "negative": 8,
+            "positive": 8,
+        }
+
+    # Golden check: execute the equivalent QuaPy pipeline directly with the exact
+    # persisted indices and compare its MAE with the Lab artifact.
+    import numpy as np
+    from quapy.data.base import LabelledCollection
+    from quapy.method.aggregative import ACC
+    from sklearn.linear_model import LogisticRegression
+
+    full = LabelledCollection(
+        np.asarray(
+            [[float(index)] for index in range(12)] + [[float(index + 100)] for index in range(12)]
+        ),
+        np.asarray(["negative"] * 12 + ["positive"] * 12),
+        classes=["negative", "positive"],
+    )
+    split_manifest = manifests[0]
+    direct_train = full.sampling_from_index(split_manifest["train_indices"])
+    direct_test = full.sampling_from_index(split_manifest["test_indices"])
+    direct = ACC(LogisticRegression(max_iter=1000, random_state=7))
+    direct.fit(direct_train.instances, direct_train.labels)
+    direct_estimate = direct.quantify(direct_test.instances)
+    direct_mae = sum(
+        abs(left - right)
+        for left, right in zip(direct_estimate, direct_test.prevalence(), strict=True)
+    ) / len(direct_estimate)
+    evaluation_node = next(node for node in nodes if node["node_type"] == "evaluation")
+    lab_evaluation = json.loads(
+        client.get(f"/api/v1/artifacts/{evaluation_node['output_artifact_ids'][0]}/download").data
+    )
+    assert math.isclose(lab_evaluation["value"], direct_mae, rel_tol=1e-12, abs_tol=1e-12)
+
+    graph["nodes"] = [node for node in graph["nodes"] if node["type"] != "evaluation"] + [
+        {
+            "id": "app",
+            "type": "app",
+            "version": 1,
+            "config": {"sample_size": 4, "n_prevalences": 3, "repeats": 1},
+        },
+        {"id": "protocol-evaluation", "type": "protocol_evaluation", "version": 1, "config": {}},
+    ]
+    graph["edges"] = [edge for edge in graph["edges"] if edge["target"] != "evaluation"] + [
+        {
+            "id": "split-app",
+            "source": "split",
+            "source_port": "test",
+            "target": "app",
+            "target_port": "collection",
+        },
+        {
+            "id": "app-evaluation",
+            "source": "app",
+            "source_port": "protocol",
+            "target": "protocol-evaluation",
+            "target_port": "protocol",
+        },
+        {
+            "id": "acc-protocol-evaluation",
+            "source": "acc",
+            "source_port": "quantifier",
+            "target": "protocol-evaluation",
+            "target_port": "quantifier",
+        },
+    ]
+    protocol_workflow = client.post(
+        f"/api/v1/projects/{project_id}/workflows",
+        json={"name": "CSV ACC protocol", "graph": graph},
+    ).get_json()
+    protocol_run = client.post(
+        f"/api/v1/projects/{project_id}/runs",
+        json={"workflow_revision_id": protocol_workflow["draft_revision_id"], "seed": 7},
+    ).get_json()
+
+    assert worker.run_once()
+    protocol_result = client.get(f"/api/v1/runs/{protocol_run['id']}").get_json()
+    assert protocol_result["status"] == "succeeded", protocol_result
+    protocol_nodes = client.get(f"/api/v1/runs/{protocol_run['id']}/nodes").get_json()["items"]
+    evaluation = next(node for node in protocol_nodes if node["node_type"] == "protocol_evaluation")
+    normalized = json.loads(
+        client.get(f"/api/v1/artifacts/{evaluation['output_artifact_ids'][0]}/download").data
+    )
+    assert normalized["schema_version"] == 2
+    assert normalized["protocol"] == "app"
+    assert len(normalized["samples"]) == 3
+    assert normalized["samples"][0]["sample_id"] == "sample-000000"
+    assert set(normalized["samples"][0]) == {
+        "sample_id",
+        "true_prevalence",
+        "estimated_prevalence",
+        "metrics",
+    }
+
+    quantifier_node = next(node for node in graph["nodes"] if node["id"] == "acc")
+    for method in ("pcc", "pacc"):
+        quantifier_node["type"] = method
+        method_workflow = client.post(
+            f"/api/v1/projects/{project_id}/workflows",
+            json={"name": f"CSV {method.upper()} protocol", "graph": graph},
+        ).get_json()
+        method_run = client.post(
+            f"/api/v1/projects/{project_id}/runs",
+            json={"workflow_revision_id": method_workflow["draft_revision_id"], "seed": 7},
+        ).get_json()
+        assert worker.run_once()
+        method_result = client.get(f"/api/v1/runs/{method_run['id']}").get_json()
+        assert method_result["status"] == "succeeded", method_result

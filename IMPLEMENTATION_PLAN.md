@@ -578,7 +578,7 @@ Legend: **complete** means the originally described slice is present and tested;
 8. **Complete:** expose the allow-listed server-owned registry through `/api/v1/node-types` without client-controlled imports.
 9. **Partial:** implement graph validation and deterministic topological sorting with structured errors. Property-based DAG coverage and unknown-version migration behavior remain.
 10. **Complete for the local backend:** add atomic content-addressed artifact storage, hash verification before trusted deserialization, provenance, and group-scoped reads. Garbage collection and orphan reconciliation remain operational follow-ups.
-11. **Partial:** build the React Flow shell, typed handles, inspector, save/reload, validation, dataset configuration, execution state, cancellation, artifact links, and run history. The remaining Phase-3 editing and accessibility features are listed above.
+11. **Partial:** build the React Flow shell, typed handles, inspector, save/reload, validation, dataset configuration, execution state, cancellation, artifact downloads, and run history. User node positions are persisted in workflow revisions and restored without implicit repositioning; auto-layout is an explicit undoable toolbar action. Node creation uses a distinct searchable palette rather than mixing every node type with workflow actions. Node and connector deletion plus explicit-edit undo/redo are implemented. Dataset management is an on-demand filtered/scrollable panel rather than a permanent bar, and transient import/result/status panels are dismissible and reopenable. Browser downloads use authenticated blob retrieval; standalone pywebview downloads use the native Save dialog through a narrow bridge. Node duplication, copy/paste, drag-history capture, minimap, dirty-state protection, keyboard/accessibility completion, and component tests remain.
 12. **Partial:** implement CSV/TSV ingestion/versioning, curated QuaPy imports, schema metadata, and deterministic fixtures. Persisted split indices and the complete ingestion wizard remain.
 13. **Partial:** implement dedicated local worker processes, run-specific claiming, cancellation escalation, crash/restart reconciliation, initiating-actor provenance, ACC execution, MAE evaluation, reports, and subprocess integration tests. APP/NPP and full reproducibility capture remain.
 
@@ -588,14 +588,21 @@ These are the next independently reviewable changes:
 
 1. Refactor `WorkflowEditor` into focused editor, dataset-import, run-history, and result components; add component tests for save, enqueue, poll, cancel, history restore, and artifact actions.
 2. Add one Playwright path for project creation -> CSV import -> workflow construction -> process-backed run -> report retrieval.
-3. Replace materialized-only splitting with a versioned split artifact containing source dataset-version ID, train/test row indices, seed, strategy, and class distribution; reconstruct collections from those immutable inputs.
-4. Capture the exact application/Python/QuaPy/scikit-learn/NumPy environment, resolved node configuration, dataset-version bindings, wall time, and node timing in every run.
-5. Add prevalence-output invariants and golden tests comparing the Lab's ACC/MAE result with a direct QuaPy script under the same data and seed.
-6. Add APP and NPP protocol definitions/adapters plus a normalized per-sample evaluation artifact with sample IDs, true prevalence, estimated prevalence, and metric values.
-7. Add PCC and PACC after the protocol artifact is stable; then add EMQ and the distribution-matching methods with registry-declared binary/multiclass and dependency constraints.
-8. Build paired result comparison, rankings, timing summaries, CSV/JSON export, and the first binary diagonal/error-by-drift plots.
+3. **Complete for user-imported labelled collections:** replace materialized-only splitting with versioned JSON split artifacts containing source dataset-version/artifact identity, train/test row indices, seed, strategy, and class distributions; reconstruct collections from those immutable inputs. Curated loaders that supply an authoritative train/test pair retain that upstream split.
+4. **Complete:** capture the exact application/Python/QuaPy/scikit-learn/NumPy environment, resolved node configuration, dataset-version bindings, run wall time, and node timing in every run.
+5. **Complete for ACC/MAE:** prevalence-output invariants are enforced before evaluation artifacts are persisted, and a golden test compares the Lab's ACC/MAE result with a direct QuaPy script under the same data, split indices, classifier, and seed.
+6. **Complete:** add APP and NPP protocol definitions/adapters plus a normalized per-sample evaluation artifact with stable sample IDs, true prevalence, estimated prevalence, and metric values. APP is covered end to end against the installed QuaPy runtime; NPP shares the same validated adapter path.
+7. **Partial:** PCC and PACC are implemented and exercised end to end on APP samples. EMQ, HDy, and DMy are allow-listed with runtime adapters, bounded `n_jobs` where supported, and registry-declared cardinality/classifier requirements; method-specific configuration and broader scientific reference coverage remain. DMx is deferred because QuaPy 0.2.2 does not expose it from the supported aggregative API.
+8. **Partial:** individual run reports identify the quantifier/protocol, summarize the supported mean error family, show normalized per-sample AE/RAE/SE/KLD/NKLD/NAE/NRAE values and prevalence results, node timings, and reproducibility metadata; JSON and formula-safe CSV downloads are available. Paired multi-method comparison, rankings, PNG/PDF export, and binary diagonal/error-by-drift plots remain.
 9. Add allow-listed tabular preprocessing with explicit train-only fitting and leakage-focused tests.
 10. Exercise PostgreSQL, role/authorization matrices, process concurrency, worker cancellation, and packaging on Windows and Linux CI before declaring the execution phases complete.
+
+Process execution checkpoint: the complete dataset -> split -> ACC + classifier -> evaluation -> report graph is covered through a real isolated child process. Frozen desktop dispatch preserves the `worker` subcommand instead of incorrectly nesting it under `desktop`, which previously caused argparse exit code 2 before execution began.
+
+### Lifecycle implementation status
+
+- **Partial:** shared-group rename/owner deletion, project rename and authorized deletion, workflow rename/duplicate/deletion, and dataset deletion are available through the API and UI. Deletion is soft and deliberately preserves immutable revisions, dataset versions, runs, and artifact evidence. Personal workspaces cannot be deleted. Restore/purge/retention administration, run deletion policy, and artifact garbage collection remain.
+- **Partial:** graph nodes and connectors can be deleted in the editor, with incident connectors removed atomically and explicit graph edits available to undo/redo before the next immutable revision is saved.
 
 ## 14. Research basis
 

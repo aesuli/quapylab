@@ -159,3 +159,41 @@ def test_project_transfer_requires_administration_of_both_groups() -> None:
         )
         assert project.group_id == destination.id
         assert destination_owner_id != owner_id
+
+
+def test_shared_group_can_be_renamed_and_only_owner_can_delete_it() -> None:
+    database = Database("sqlite+pysqlite:///:memory:")
+    database.create_schema()
+    owner_id, admin_id, _, group_id, _ = shared_workspace(database)
+    service = GroupService()
+
+    with database.transaction() as session:
+        renamed = service.update_group(
+            session,
+            actor=actor(admin_id, group_id),
+            group_id=group_id,
+            name="Renamed research",
+        )
+        assert renamed.name == "Renamed research"
+        with pytest.raises(PermissionError):
+            service.delete_group(session, actor=actor(admin_id, group_id), group_id=group_id)
+
+    with database.transaction() as session:
+        service.delete_group(session, actor=actor(owner_id, group_id), group_id=group_id)
+
+    with database.transaction() as session:
+        visible_group_ids = {
+            group.id for group, _ in service.list_groups(session, actor=actor(owner_id, group_id))
+        }
+        assert group_id not in visible_group_ids
+        events = list(session.scalars(select(AuditEvent).where(AuditEvent.group_id == group_id)))
+        assert [event.action for event in events[-3:]] == [
+            "group.update",
+            "group.delete",
+            "group.delete",
+        ]
+        assert [event.outcome for event in events[-3:]] == [
+            "success",
+            "denied",
+            "success",
+        ]

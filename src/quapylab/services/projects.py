@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from quapylab.domain.actor import ActorContext
 from quapylab.persistence.models import (
+    Group,
     GroupMembership,
     MembershipRole,
     Project,
@@ -43,13 +45,18 @@ class ProjectService:
         self._require(session, actor, group_id, Permission.READ_PROJECT)
         return list(
             session.scalars(
-                select(Project).where(Project.group_id == group_id).order_by(Project.name)
+                select(Project)
+                .where(Project.group_id == group_id, Project.deleted_at.is_(None))
+                .order_by(Project.name)
             )
         )
 
     def get_project(self, session: Session, *, actor: ActorContext, project_id: str) -> Project:
         project = session.get(Project, project_id)
-        if project is None:
+        if project is None or project.deleted_at is not None:
+            raise AuthorizationError("Resource not found.")
+        group = session.get(Group, project.group_id)
+        if group is None or group.deleted_at is not None:
             raise AuthorizationError("Resource not found.")
         self._require(session, actor, project.group_id, Permission.READ_PROJECT)
         return project
@@ -60,7 +67,9 @@ class ProjectService:
         project = self.get_project(session, actor=actor, project_id=project_id)
         return list(
             session.scalars(
-                select(Workflow).where(Workflow.project_id == project.id).order_by(Workflow.name)
+                select(Workflow)
+                .where(Workflow.project_id == project.id, Workflow.deleted_at.is_(None))
+                .order_by(Workflow.name)
             )
         )
 
@@ -94,7 +103,7 @@ class ProjectService:
 
     def get_workflow(self, session: Session, *, actor: ActorContext, workflow_id: str) -> Workflow:
         workflow = session.get(Workflow, workflow_id)
-        if workflow is None:
+        if workflow is None or workflow.deleted_at is not None:
             raise AuthorizationError("Resource not found.")
         project = self.get_project(session, actor=actor, project_id=workflow.project_id)
         if project.id != workflow.project_id:
@@ -112,7 +121,7 @@ class ProjectService:
 
     def _project_for_edit(self, session: Session, actor: ActorContext, project_id: str) -> Project:
         project = session.get(Project, project_id)
-        if project is None:
+        if project is None or project.deleted_at is not None:
             raise AuthorizationError("Resource not found.")
         self._require(session, actor, project.group_id, Permission.EDIT_PROJECT)
         return project
@@ -121,10 +130,65 @@ class ProjectService:
         self, session: Session, actor: ActorContext, workflow_id: str
     ) -> Workflow:
         workflow = session.get(Workflow, workflow_id)
-        if workflow is None:
+        if workflow is None or workflow.deleted_at is not None:
             raise AuthorizationError("Resource not found.")
         self._project_for_edit(session, actor, workflow.project_id)
         return workflow
+
+    def update_project(
+        self,
+        session: Session,
+        *,
+        actor: ActorContext,
+        project_id: str,
+        name: str,
+        description: str,
+    ) -> Project:
+        project = self._project_for_edit(session, actor, project_id)
+        if not name.strip():
+            raise ValueError("Project name is required.")
+        project.name = name.strip()
+        project.description = description.strip()
+        project.version += 1
+        return project
+
+    def delete_project(self, session: Session, *, actor: ActorContext, project_id: str) -> None:
+        project = session.get(Project, project_id)
+        if project is None or project.deleted_at is not None:
+            raise AuthorizationError("Resource not found.")
+        self._require(session, actor, project.group_id, Permission.MANAGE_GROUP)
+        project.deleted_at = datetime.now(UTC)
+
+    def update_workflow(
+        self, session: Session, *, actor: ActorContext, workflow_id: str, name: str
+    ) -> Workflow:
+        workflow = self._workflow_for_edit(session, actor, workflow_id)
+        if not name.strip():
+            raise ValueError("Workflow name is required.")
+        workflow.name = name.strip()
+        workflow.version += 1
+        return workflow
+
+    def duplicate_workflow(
+        self, session: Session, *, actor: ActorContext, workflow_id: str, name: str
+    ) -> Workflow:
+        source = self._workflow_for_edit(session, actor, workflow_id)
+        if source.draft_revision_id is None:
+            raise ValueError("Workflow has no draft revision to duplicate.")
+        revision = session.get(WorkflowRevision, source.draft_revision_id)
+        if revision is None:
+            raise RuntimeError("Workflow draft revision is missing.")
+        return self.create_workflow(
+            session,
+            actor=actor,
+            project_id=source.project_id,
+            name=name,
+            graph=revision.graph,
+        )
+
+    def delete_workflow(self, session: Session, *, actor: ActorContext, workflow_id: str) -> None:
+        workflow = self._workflow_for_edit(session, actor, workflow_id)
+        workflow.deleted_at = datetime.now(UTC)
 
     @staticmethod
     def _new_revision(
@@ -148,6 +212,9 @@ class ProjectService:
     def _require(
         session: Session, actor: ActorContext, group_id: str, permission: Permission
     ) -> None:
+        group = session.get(Group, group_id)
+        if group is None or group.deleted_at is not None:
+            raise AuthorizationError("Resource not found.")
         membership = session.scalar(
             select(GroupMembership).where(
                 GroupMembership.group_id == group_id,

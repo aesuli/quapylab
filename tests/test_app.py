@@ -1,7 +1,10 @@
+import sys
+from types import ModuleType, SimpleNamespace
+
 from quapylab import __version__
 from quapylab.app import create_app
 from quapylab.config import DeploymentMode
-from quapylab.desktop import run_desktop
+from quapylab.desktop import NativeDesktopBridge, run_desktop
 from quapylab.domain.actor import desktop_actor
 from quapylab.persistence.models import Group, GroupMembership, MembershipRole, User
 
@@ -26,6 +29,39 @@ def test_version_describes_internal_api() -> None:
         "application": "quapylab",
         "version": __version__,
     }
+
+
+def test_native_bridge_saves_an_artifact_through_the_desktop_dialog(
+    tmp_path, monkeypatch
+) -> None:
+    destination = tmp_path / "evaluation.json"
+    webview = ModuleType("webview")
+    webview.SAVE_DIALOG = 30  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "webview", webview)
+
+    class Client:
+        @staticmethod
+        def get(path: str):
+            assert path == "/api/v1/artifacts/artifact-1/download"
+            return SimpleNamespace(
+                status_code=200,
+                data=b'{"value": 0.1}',
+                headers={"Content-Disposition": 'attachment; filename="evaluation.json"'},
+            )
+
+    application = SimpleNamespace(test_client=lambda: Client())
+    window = SimpleNamespace(
+        create_file_dialog=lambda dialog, save_filename: (
+            str(destination),
+        )
+    )
+    bridge = NativeDesktopBridge(application)
+    bridge.bind_window(window)
+
+    result = bridge.download_artifact("artifact-1")
+
+    assert result == {"saved": True, "path": str(destination)}
+    assert destination.read_bytes() == b'{"value": 0.1}'
 
 
 def test_frontend_entrypoint_is_available_with_or_without_a_build() -> None:
@@ -68,9 +104,17 @@ def test_node_types_are_published_by_the_server() -> None:
     assert body["schema_version"] == 1
     assert [item["type"] for item in body["items"]] == [
         "acc",
+        "app",
         "classifier",
         "dataset",
+        "dmy",
+        "emq",
         "evaluation",
+        "hdy",
+        "npp",
+        "pacc",
+        "pcc",
+        "protocol_evaluation",
         "report",
         "split",
     ]

@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -23,6 +23,20 @@ class Database:
         from quapylab.persistence.models import Base
 
         Base.metadata.create_all(self.engine)
+        # Development/desktop historically bootstrapped with create_all rather than
+        # Alembic. Keep those existing databases startable for additive lifecycle
+        # columns; supported deployments still run the versioned migration.
+        inspector = inspect(self.engine)
+        with self.engine.begin() as connection:
+            for table in ("groups", "projects", "workflows", "datasets"):
+                columns = {column["name"] for column in inspector.get_columns(table)}
+                if "deleted_at" not in columns:
+                    connection.execute(text(f"ALTER TABLE {table} ADD COLUMN deleted_at TIMESTAMP"))
+                connection.execute(
+                    text(
+                        f"CREATE INDEX IF NOT EXISTS ix_{table}_deleted_at ON {table} (deleted_at)"
+                    )
+                )
 
     @contextmanager
     def transaction(self) -> Iterator[Session]:
