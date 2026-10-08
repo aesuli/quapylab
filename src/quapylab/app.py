@@ -463,11 +463,14 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
         service: ArtifactService = app.extensions["quapylab.artifacts"]
         with database.transaction() as session:
             item, content = service.read(session, actor=g.actor, artifact_id=artifact_id)
-        if (
-            item.kind != "evaluation-result"
-            or item.media_type != "application/vnd.quapylab.evaluation-result+json"
+        if item.kind == "evaluation-comparison" and item.media_type == (
+            "application/vnd.quapylab.evaluation-comparison+json"
         ):
-            raise ValueError("Artifact is not an evaluation result.")
+            return _comparison_csv_response(item, json.loads(content))
+        if item.kind != "evaluation-result" or item.media_type != (
+            "application/vnd.quapylab.evaluation-result+json"
+        ):
+            raise ValueError("Artifact is not an evaluation or comparison result.")
         evaluation = json.loads(content)
         output = io.StringIO(newline="")
         writer = csv.writer(output, lineterminator="\r\n")
@@ -735,10 +738,47 @@ def _csv_safe(value: Any) -> str:
     return f"'{rendered}" if rendered.startswith(("=", "+", "-", "@")) else rendered
 
 
+def _comparison_csv_response(artifact: Any, comparison: dict[str, Any]) -> Response:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\r\n")
+    classes = [_csv_safe(value) for value in comparison.get("classes", [])]
+    metric_names = comparison.get("metric_names", [])
+    writer.writerow(
+        ["method_id", "quantifier", "sample_id"]
+        + [f"true_{value}" for value in classes]
+        + [f"estimated_{value}" for value in classes]
+        + metric_names
+    )
+    for method in comparison.get("methods", []):
+        if not isinstance(method, dict):
+            continue
+        for sample in method.get("samples", []):
+            if not isinstance(sample, dict):
+                continue
+            writer.writerow(
+                [
+                    _csv_safe(method.get("method_id", "")),
+                    _csv_safe(method.get("quantifier", "")),
+                    _csv_safe(sample.get("sample_id", "")),
+                ]
+                + sample.get("true_prevalence", [])
+                + sample.get("estimated_prevalence", [])
+                + [sample.get("metrics", {}).get(name, "") for name in metric_names]
+            )
+    response = Response(output.getvalue(), mimetype="text/csv")
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="comparison-{artifact.sha256[:12]}.csv"'
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 def _artifact_filename(artifact: Any) -> str:
     extension = {
         "application/json": "json",
         "application/vnd.quapylab.evaluation-result+json": "json",
+        "application/vnd.quapylab.evaluation-comparison+json": "json",
+        "application/vnd.quapylab.model-selection+json": "json",
         "application/vnd.quapylab.dataset-split+json": "json",
         "application/vnd.quapylab.protocol+json": "json",
         "text/csv": "csv",

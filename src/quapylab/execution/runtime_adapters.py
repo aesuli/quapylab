@@ -54,6 +54,8 @@ class RuntimeNodeExecutor:
             ("npp", 1): self._npp,
             ("protocol_evaluation", 1): self._protocol_evaluation,
             ("report", 1): self._report,
+            ("comparison", 1): self._comparison,
+            ("model_selection", 1): self._model_selection,
         }
 
     def __call__(self, session: Session, run: Run, node: NodeRun) -> None:
@@ -86,12 +88,24 @@ class RuntimeNodeExecutor:
         if hasattr(data, "training") and hasattr(data, "test"):
             train = self._store_materialization(session, run, node, data.training)
             test = self._store_materialization(session, run, node, data.test)
+            validation = None
         else:
             train_proportion = _config(node).get("train_proportion", 0.7)
-            if not isinstance(train_proportion, (int, float)) or not 0 < train_proportion < 1:
-                raise ValueError("Split train_proportion must be strictly between zero and one.")
-            train_indices, test_indices = _stratified_indices(
-                data, float(train_proportion), run.seed
+            validation_proportion = _config(node).get("validation_proportion", 0)
+            if (
+                not isinstance(train_proportion, (int, float))
+                or isinstance(train_proportion, bool)
+                or not isinstance(validation_proportion, (int, float))
+                or isinstance(validation_proportion, bool)
+                or not 0 < train_proportion < 1
+                or not 0 <= validation_proportion < 1
+                or train_proportion + validation_proportion >= 1
+            ):
+                raise ValueError(
+                    "Split proportions must leave non-empty train, validation, and test shares."
+                )
+            train_indices, validation_indices, test_indices = _stratified_partition_indices(
+                data, float(train_proportion), float(validation_proportion), run.seed
             )
             common = {
                 "schema_version": 1,
@@ -101,17 +115,29 @@ class RuntimeNodeExecutor:
                 "seed": run.seed,
                 "strategy": "stratified",
                 "train_proportion": float(train_proportion),
+                "validation_proportion": float(validation_proportion),
                 "train_indices": train_indices,
+                "validation_indices": validation_indices,
                 "test_indices": test_indices,
                 "class_distribution": {
                     "train": _class_distribution(data, train_indices),
+                    "validation": _class_distribution(data, validation_indices),
                     "test": _class_distribution(data, test_indices),
                 },
             }
             train = self._store_split_manifest(session, run, node, {**common, "partition": "train"})
             test = self._store_split_manifest(session, run, node, {**common, "partition": "test"})
+            validation = (
+                self._store_split_manifest(
+                    session, run, node, {**common, "partition": "validation"}
+                )
+                if validation_indices
+                else None
+            )
         node.output_artifact_ids = [train.id, test.id]
-        _log(node, "split.completed", "Recorded the deterministic training and evaluation split.")
+        if validation is not None:
+            node.output_artifact_ids.append(validation.id)
+        _log(node, "split.completed", "Recorded deterministic train/validation/test partitions.")
 
     def _classifier(self, session: Session, run: Run, node: NodeRun) -> None:
         spec = _classifier_spec(_config(node), run.seed)
@@ -390,6 +416,127 @@ class RuntimeNodeExecutor:
             "Rendered the evaluation result as a self-contained HTML report.",
         )
 
+    def _comparison(self, session: Session, run: Run, node: NodeRun) -> None:
+        evaluations: list[tuple[str, dict[str, Any]]] = []
+        for port in ("evaluation_1", "evaluation_2", "evaluation_3", "evaluation_4"):
+            artifact = _optional_input_artifact(session, run, node, port)
+            if artifact is None:
+                continue
+            if (
+                artifact.kind != "evaluation-result"
+                or artifact.media_type != "application/vnd.quapylab.evaluation-result+json"
+            ):
+                raise RuntimeError(f"Comparison input {port!r} is not an evaluation result.")
+            evaluation = json.loads(self._artifacts.read_for_worker(artifact))
+            if not isinstance(evaluation, dict):
+                raise RuntimeError(f"Comparison input {port!r} is malformed.")
+            source = _input_source_node(session, run, node, port)
+            evaluations.append((source.node_id, evaluation))
+        comparison = _comparison_result(evaluations)
+        comparison_artifact = self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="evaluation-comparison",
+            media_type="application/vnd.quapylab.evaluation-comparison+json",
+            content=json.dumps(comparison, sort_keys=True, separators=(",", ":")).encode(),
+            serialization={"format": "json", "schema_version": 1},
+        )
+        report_artifact = self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="comparison-report",
+            media_type="text/html",
+            content=_comparison_html(comparison, run=run).encode("utf-8"),
+            serialization={"format": "html", "schema_version": 1},
+        )
+        node.output_artifact_ids = [comparison_artifact.id, report_artifact.id]
+        _log(
+            node,
+            "comparison.completed",
+            f"Compared and ranked {len(evaluations)} methods on paired samples.",
+        )
+
+    def _model_selection(self, session: Session, run: Run, node: NodeRun) -> None:
+        training = self._collection_input(session, run, node, "train")
+        classifier_spec = self._classifier_spec_input(session, run, node)
+        protocol_artifact = _input_artifact(session, run, node, "validation_protocol")
+        protocol, _classes = _load_protocol(session, run, protocol_artifact, self._artifacts)
+        config = _model_selection_config(_config(node), classifier_spec)
+        classifier = _classifier_from_spec(classifier_spec)
+        try:
+            import quapy.method.aggregative as aggregative
+            from quapy.model_selection import GridSearchQ  # type: ignore[import-untyped]
+        except ImportError as error:  # pragma: no cover - deployment dependency failure
+            raise RuntimeError("QuaPy is required to execute model selection.") from error
+        quantifier_type = getattr(aggregative, config["method"].upper(), None)
+        if quantifier_type is None:
+            raise RuntimeError(f"Installed QuaPy does not provide {config['method'].upper()}.")
+        constructor = signature(quantifier_type).parameters
+        quantifier_options = {"n_jobs": 1} if "n_jobs" in constructor else {}
+        quantifier = quantifier_type(classifier, **quantifier_options)
+        search = GridSearchQ(
+            quantifier,
+            {config["parameter_name"]: config["classifier_values"]},
+            protocol,
+            error=config["error"],
+            refit=config["refit"],
+            n_jobs=1,
+            raise_errors=False,
+            verbose=False,
+        )
+        search.fit(training.instances, training.labels)
+        model_artifact = self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="quapy-quantifier",
+            media_type=_QUANTIFIER_MEDIA_TYPE,
+            content=pickle.dumps(search.best_model_, protocol=pickle.HIGHEST_PROTOCOL),
+            serialization={
+                "format": "pickle",
+                "trusted_producer": "workflow-runtime",
+                "selected_by": "GridSearchQ",
+            },
+        )
+        result = {
+            "schema_version": 1,
+            "method": config["method"],
+            "error": config["error"],
+            "refit": config["refit"],
+            "n_jobs": 1,
+            "parameter_grid": {config["parameter_name"]: config["classifier_values"]},
+            "best_params": search.best_params_,
+            "best_score": float(search.best_score_),
+            "fit_time_seconds": float(search.fit_time_),
+            "attempts": {
+                key: float(value) if isinstance(value, (int, float)) else str(value)
+                for key, value in search.param_scores_.items()
+            },
+            "errors": [str(error) for error in search.error_collector],
+        }
+        evidence_artifact = self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="model-selection-result",
+            media_type="application/vnd.quapylab.model-selection+json",
+            content=json.dumps(result, sort_keys=True, separators=(",", ":")).encode(),
+            serialization={"format": "json", "schema_version": 1},
+        )
+        node.output_artifact_ids = [model_artifact.id, evidence_artifact.id]
+        _log(
+            node,
+            "model_selection.completed",
+            f"Selected {config['method'].upper()} parameters with {config['error'].upper()} "
+            f"score {search.best_score_:.8g}.",
+        )
+
     def _collection_input(self, session: Session, run: Run, node: NodeRun, port: str) -> Any:
         artifact = _input_artifact(session, run, node, port)
         if artifact.kind == "dataset-split" and artifact.media_type == _SPLIT_MEDIA_TYPE:
@@ -435,11 +582,12 @@ class RuntimeNodeExecutor:
 
     def _quantifier_input(self, session: Session, run: Run, node: NodeRun) -> Any:
         artifact = _input_artifact(session, run, node, "quantifier")
+        serialization = artifact.serialization
         if (
             artifact.kind != "quapy-quantifier"
             or artifact.media_type != _QUANTIFIER_MEDIA_TYPE
-            or artifact.serialization
-            != {"format": "pickle", "trusted_producer": "workflow-runtime"}
+            or serialization.get("format") != "pickle"
+            or serialization.get("trusted_producer") != "workflow-runtime"
         ):
             raise RuntimeError("Quantifier input is not a trusted QuaPy runtime artifact.")
         return _load_pickle(self._artifacts, artifact)
@@ -638,7 +786,11 @@ def _load_split_partition(
         raise RuntimeError("Split manifest is malformed.")
     source_id = manifest.get("source_artifact_id")
     partition = manifest.get("partition")
-    indices = manifest.get(f"{partition}_indices") if partition in {"train", "test"} else None
+    indices = (
+        manifest.get(f"{partition}_indices")
+        if partition in {"train", "validation", "test"}
+        else None
+    )
     source = session.get(Artifact, source_id) if isinstance(source_id, str) else None
     if (
         source is None
@@ -747,6 +899,15 @@ def _input_artifact(session: Session, run: Run, node: NodeRun, port: str) -> Art
     return artifact
 
 
+def _optional_input_artifact(
+    session: Session, run: Run, node: NodeRun, port: str
+) -> Artifact | None:
+    bindings = node.resolved_config.get("__inputs")
+    if not isinstance(bindings, dict) or port not in bindings:
+        return None
+    return _input_artifact(session, run, node, port)
+
+
 def _input_source_node(session: Session, run: Run, node: NodeRun, port: str) -> NodeRun:
     return _input_source(session, run, node, port)[0]
 
@@ -836,6 +997,54 @@ def _classifier_spec(config: dict[str, Any], run_seed: int) -> dict[str, Any]:
     raise ValueError("Classifier kind is not allow-listed.")
 
 
+def _model_selection_config(
+    config: dict[str, Any], classifier_spec: dict[str, Any]
+) -> dict[str, Any]:
+    allowed = {"method", "classifier_values", "error", "refit"}
+    if set(config) - allowed:
+        raise ValueError("Model-selection config contains unsupported settings.")
+    method = config.get("method", "acc")
+    values = config.get("classifier_values", [0.1, 1.0, 10.0])
+    error = config.get("error", "mae")
+    refit = config.get("refit", True)
+    if method not in {"acc", "pacc"}:
+        raise ValueError("Model-selection method is not allow-listed.")
+    if error not in {"mae", "mrae", "mse", "mkld", "mnkld", "mnae", "mnrae"}:
+        raise ValueError("Model-selection error measure is not allow-listed.")
+    if not isinstance(refit, bool):
+        raise ValueError("Model-selection refit must be boolean.")
+    if not isinstance(values, list) or not 1 <= len(values) <= 50:
+        raise ValueError("Model selection requires between one and fifty classifier values.")
+    classifier_kind = classifier_spec.get("kind")
+    if classifier_kind == "logistic_regression":
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value <= 0
+            for value in values
+        ):
+            raise ValueError("Logistic-regression C candidates must be finite and positive.")
+        parameter_name = "classifier__C"
+        resolved_values: list[int | float] = [float(value) for value in values]
+    elif classifier_kind == "random_forest":
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in values
+        ):
+            raise ValueError("Random-forest tree-count candidates must be positive integers.")
+        parameter_name = "classifier__n_estimators"
+        resolved_values = values
+    else:
+        raise ValueError("Classifier is unsupported for model selection.")
+    return {
+        "method": method,
+        "classifier_values": resolved_values,
+        "parameter_name": parameter_name,
+        "error": error,
+        "refit": refit,
+    }
+
+
 def _tabular_transformer(config: dict[str, Any]) -> tuple[Any, dict[str, str]]:
     allowed = {"imputation", "scaling"}
     if set(config) - allowed:
@@ -870,6 +1079,173 @@ def _tabular_transformer(config: dict[str, Any]) -> tuple[Any, dict[str, str]]:
     if not steps:
         steps.append(("identity", FunctionTransformer(validate=True)))
     return Pipeline(steps), {"imputation": imputation, "scaling": scaling}
+
+
+def _comparison_result(
+    evaluations: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    if len(evaluations) < 2:
+        raise ValueError("A comparison requires at least two evaluation results.")
+    reference_id, reference = evaluations[0]
+    if reference.get("schema_version") != 2 or not isinstance(reference.get("samples"), list):
+        raise ValueError(
+            "Method comparison requires protocol evaluation results with paired samples."
+        )
+    protocol = reference.get("protocol")
+    classes = reference.get("classes")
+    reference_samples = reference["samples"]
+    sample_ids = [sample.get("sample_id") for sample in reference_samples]
+    true_prevalences = [sample.get("true_prevalence") for sample in reference_samples]
+    if (
+        not isinstance(protocol, str)
+        or not isinstance(classes, list)
+        or not sample_ids
+        or any(not isinstance(sample_id, str) for sample_id in sample_ids)
+    ):
+        raise ValueError(f"Evaluation {reference_id!r} has malformed pairing metadata.")
+    methods: list[dict[str, Any]] = []
+    for method_id, evaluation in evaluations:
+        samples = evaluation.get("samples")
+        if (
+            evaluation.get("schema_version") != 2
+            or evaluation.get("protocol") != protocol
+            or evaluation.get("classes") != classes
+            or not isinstance(samples, list)
+            or [sample.get("sample_id") for sample in samples] != sample_ids
+            or [sample.get("true_prevalence") for sample in samples] != true_prevalences
+        ):
+            raise ValueError(
+                "Comparison inputs must use the same protocol, classes, paired sample IDs, "
+                "and true prevalences."
+            )
+        metrics = evaluation.get("metrics")
+        if not isinstance(metrics, dict) or not metrics:
+            raise ValueError(f"Evaluation {method_id!r} has no aggregate metrics.")
+        methods.append(
+            {
+                "method_id": method_id,
+                "quantifier": str(evaluation.get("quantifier", method_id)),
+                "metrics": {name: float(value) for name, value in metrics.items()},
+                "samples": samples,
+            }
+        )
+    metric_names = sorted(set.intersection(*(set(method["metrics"]) for method in methods)))
+    rankings = {
+        metric: [
+            {"rank": rank, "method_id": method["method_id"], "value": method["metrics"][metric]}
+            for rank, method in enumerate(
+                sorted(methods, key=lambda item: (item["metrics"][metric], item["method_id"])),
+                start=1,
+            )
+        ]
+        for metric in metric_names
+    }
+    return {
+        "schema_version": 1,
+        "protocol": protocol,
+        "classes": classes,
+        "paired_sample_ids": sample_ids,
+        "metric_names": metric_names,
+        "rankings": rankings,
+        "methods": methods,
+    }
+
+
+def _comparison_html(comparison: dict[str, Any], *, run: Run) -> str:
+    methods = comparison["methods"]
+    metric_names = comparison["metric_names"]
+    ranking_rows = "".join(
+        "<tr>"
+        f"<td>{rank}</td><td>{html.escape(item['method_id'])}</td>"
+        f"<td>{html.escape(str(item['quantifier']).upper())}</td>"
+        + "".join(f"<td>{item['metrics'][metric]:.8g}</td>" for metric in metric_names)
+        + "</tr>"
+        for rank, item in enumerate(
+            sorted(
+                methods,
+                key=lambda method: (
+                    method["metrics"].get("mae", float("inf")),
+                    method["method_id"],
+                ),
+            ),
+            start=1,
+        )
+    )
+    headers = "".join(f"<th>{html.escape(metric.upper())}</th>" for metric in metric_names)
+    plots = _binary_comparison_plots(comparison)
+    provenance = html.escape(json.dumps(run.environment, sort_keys=True, indent=2))
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        "<title>QuaPy Lab method comparison</title><style>"
+        "body{font:15px system-ui;margin:2rem;color:#17251f;max-width:1200px}"
+        "table{border-collapse:collapse;width:100%;margin:1rem 0}"
+        "td,th{border:1px solid #b9c9bf;padding:.5rem;text-align:left}"
+        "th{background:#edf5f0}svg{border:1px solid #b9c9bf;background:white;margin:.5rem}"
+        "pre{overflow:auto;padding:1rem;background:#f5f7f6}</style></head><body>"
+        "<h1>QuaPy Lab method comparison</h1>"
+        f"<p><strong>Protocol:</strong> {html.escape(str(comparison['protocol']).upper())} · "
+        f"<strong>Paired samples:</strong> {len(comparison['paired_sample_ids'])} · "
+        f"<strong>Methods:</strong> {len(methods)}</p>"
+        "<p>Ranks are descriptive and ordered by lower mean error; no inferential significance "
+        "claim is made.</p><h2>Method ranking</h2>"
+        f"<table><thead><tr><th>MAE rank</th><th>Node</th><th>Method</th>{headers}</tr>"
+        f"</thead><tbody>{ranking_rows}</tbody></table>{plots}"
+        f"<h2>Reproducibility</h2><p>Run <code>{html.escape(run.id)}</code>, seed "
+        f"<code>{run.seed}</code>, workflow revision <code>{html.escape(run.workflow_revision_id)}"
+        f"</code>.</p><pre>{provenance}</pre></body></html>"
+    )
+
+
+def _binary_comparison_plots(comparison: dict[str, Any]) -> str:
+    if len(comparison["classes"]) != 2:
+        return "<p>Binary diagnostic plots are omitted for multiclass results.</p>"
+    colours = ("#13795b", "#a15c00", "#3659a2", "#9b3a62")
+    diagonal_series: list[str] = []
+    error_series: list[str] = []
+    legend: list[str] = []
+    for index, method in enumerate(comparison["methods"]):
+        colour = colours[index % len(colours)]
+        points = [
+            (sample["true_prevalence"][1], sample["estimated_prevalence"][1])
+            for sample in method["samples"]
+        ]
+        error_points = [
+            (sample["true_prevalence"][1], sample["metrics"]["ae"]) for sample in method["samples"]
+        ]
+        diagonal_series.append(_svg_points(points, colour))
+        error_series.append(_svg_points(error_points, colour))
+        legend.append(
+            f'<span style="color:{colour};margin-right:1rem">● '
+            f"{html.escape(method['method_id'])} "
+            f"({html.escape(str(method['quantifier']).upper())})</span>"
+        )
+    diagonal = _svg_plot(
+        "True positive prevalence", "Estimated positive prevalence", diagonal_series, True
+    )
+    error_plot = _svg_plot("True positive prevalence", "Absolute error", error_series, False)
+    return f"<h2>Binary diagnostics</h2><p>{''.join(legend)}</p>{diagonal}{error_plot}"
+
+
+def _svg_points(points: list[tuple[float, float]], colour: str) -> str:
+    return "".join(
+        f'<circle cx="{45 + 300 * x:.3f}" cy="{325 - 280 * min(max(y, 0), 1):.3f}" '
+        f'r="3" fill="{colour}" fill-opacity="0.7"/>'
+        for x, y in points
+    )
+
+
+def _svg_plot(x_label: str, y_label: str, series: list[str], diagonal: bool) -> str:
+    guide = '<line x1="45" y1="325" x2="345" y2="45" stroke="#89958e"/>' if diagonal else ""
+    return (
+        '<svg viewBox="0 0 380 370" width="380" height="370" role="img" '
+        f'aria-label="{html.escape(y_label)} by {html.escape(x_label)}">'
+        '<line x1="45" y1="325" x2="345" y2="325" stroke="#17251f"/>'
+        '<line x1="45" y1="325" x2="45" y2="45" stroke="#17251f"/>'
+        f"{guide}{''.join(series)}"
+        f'<text x="195" y="360" text-anchor="middle">{html.escape(x_label)}</text>'
+        f'<text x="14" y="185" text-anchor="middle" transform="rotate(-90 14 185)">'
+        f"{html.escape(y_label)}</text></svg>"
+    )
 
 
 def _report_html(evaluation: dict[str, Any], *, run: Run, nodes: list[NodeRun]) -> str:
@@ -1003,9 +1379,9 @@ def _trusted_runtime_artifact(session: Session, run: Run, node: NodeRun) -> Arti
     return artifact
 
 
-def _stratified_indices(
-    data: Any, train_proportion: float, seed: int
-) -> tuple[list[int], list[int]]:
+def _stratified_partition_indices(
+    data: Any, train_proportion: float, validation_proportion: float, seed: int
+) -> tuple[list[int], list[int], list[int]]:
     try:
         import numpy as np
     except ImportError as error:  # pragma: no cover - supplied by QuaPy
@@ -1013,20 +1389,33 @@ def _stratified_indices(
     labels = np.asarray(data.labels)
     random = np.random.RandomState(seed)
     train: list[int] = []
+    validation: list[int] = []
     test: list[int] = []
     for label in data.classes_:
         indices = np.flatnonzero(labels == label)
         random.shuffle(indices)
-        count = int(round(len(indices) * train_proportion))
-        if len(indices) > 1:
-            count = min(max(count, 1), len(indices) - 1)
-        train.extend(int(value) for value in indices[:count])
-        test.extend(int(value) for value in indices[count:])
+        if validation_proportion > 0 and len(indices) < 3:
+            raise ValueError(
+                "Each class needs at least three rows for train/validation/test splitting."
+            )
+        train_count = int(round(len(indices) * train_proportion))
+        validation_count = int(round(len(indices) * validation_proportion))
+        reserved = 1 + (1 if validation_proportion > 0 else 0)
+        train_count = min(max(train_count, 1), len(indices) - reserved)
+        if validation_proportion > 0:
+            validation_count = min(max(validation_count, 1), len(indices) - train_count - 1)
+        else:
+            validation_count = 0
+        validation_end = train_count + validation_count
+        train.extend(int(value) for value in indices[:train_count])
+        validation.extend(int(value) for value in indices[train_count:validation_end])
+        test.extend(int(value) for value in indices[validation_end:])
     random.shuffle(train)
+    random.shuffle(validation)
     random.shuffle(test)
     if not train or not test:
         raise ValueError("Dataset is too small to create non-empty train and test partitions.")
-    return train, test
+    return train, validation, test
 
 
 def _class_distribution(data: Any, indices: list[int]) -> dict[str, int]:

@@ -16,6 +16,8 @@ from quapylab.execution.runtime_adapters import (
     RuntimeNodeExecutor,
     _classifier_from_spec,
     _classifier_spec,
+    _comparison_result,
+    _model_selection_config,
     _tabular_transformer,
 )
 from quapylab.persistence.models import Artifact, Dataset, DatasetVersion, Project
@@ -96,6 +98,75 @@ def test_classifier_allowlist_rejects_unsupported_or_invalid_config(
 ) -> None:
     with pytest.raises(ValueError):
         _classifier_spec(config, 0)
+
+
+def test_comparison_ranks_methods_and_preserves_paired_samples() -> None:
+    def evaluation(quantifier: str, mae: float) -> dict[str, object]:
+        return {
+            "schema_version": 2,
+            "protocol": "app",
+            "quantifier": quantifier,
+            "classes": ["negative", "positive"],
+            "metrics": {"mae": mae, "mse": mae**2},
+            "samples": [
+                {
+                    "sample_id": "sample-000000",
+                    "true_prevalence": [0.25, 0.75],
+                    "estimated_prevalence": [0.25 + mae, 0.75 - mae],
+                    "metrics": {"ae": mae, "se": mae**2},
+                }
+            ],
+        }
+
+    comparison = _comparison_result(
+        [("acc-evaluation", evaluation("acc", 0.2)), ("pacc-evaluation", evaluation("pacc", 0.1))]
+    )
+
+    assert comparison["paired_sample_ids"] == ["sample-000000"]
+    assert comparison["rankings"]["mae"] == [
+        {"rank": 1, "method_id": "pacc-evaluation", "value": 0.1},
+        {"rank": 2, "method_id": "acc-evaluation", "value": 0.2},
+    ]
+
+
+def test_comparison_rejects_unpaired_ground_truth() -> None:
+    left = {
+        "schema_version": 2,
+        "protocol": "app",
+        "quantifier": "acc",
+        "classes": ["negative", "positive"],
+        "metrics": {"mae": 0.1},
+        "samples": [
+            {
+                "sample_id": "sample-000000",
+                "true_prevalence": [0.5, 0.5],
+                "estimated_prevalence": [0.4, 0.6],
+                "metrics": {"ae": 0.1},
+            }
+        ],
+    }
+    right = json.loads(json.dumps(left))
+    right["samples"][0]["true_prevalence"] = [0.75, 0.25]
+
+    with pytest.raises(ValueError, match="paired sample IDs"):
+        _comparison_result([("left", left), ("right", right)])
+
+
+def test_model_selection_grid_is_allowlisted_for_the_classifier() -> None:
+    logistic = _model_selection_config(
+        {"method": "pacc", "classifier_values": [0.1, 1], "error": "mae"},
+        {"kind": "logistic_regression"},
+    )
+    assert logistic["parameter_name"] == "classifier__C"
+    assert logistic["classifier_values"] == [0.1, 1.0]
+
+    forest = _model_selection_config({"classifier_values": [10, 25]}, {"kind": "random_forest"})
+    assert forest["parameter_name"] == "classifier__n_estimators"
+
+    with pytest.raises(ValueError, match="positive integers"):
+        _model_selection_config({"classifier_values": [10.5]}, {"kind": "random_forest"})
+    with pytest.raises(ValueError, match="one and fifty"):
+        _model_selection_config({"classifier_values": []}, {"kind": "logistic_regression"})
 
 
 def _install_quapy(monkeypatch: object) -> None:
@@ -499,9 +570,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
         node for node in preprocessing_nodes if node["node_type"] == "classifier"
     )
     classifier_spec = json.loads(
-        client.get(
-            f"/api/v1/artifacts/{classifier_result['output_artifact_ids'][0]}/download"
-        ).data
+        client.get(f"/api/v1/artifacts/{classifier_result['output_artifact_ids'][0]}/download").data
     )
     assert classifier_spec == {
         "kind": "random_forest",
@@ -594,3 +663,221 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
         assert worker.run_once()
         method_result = client.get(f"/api/v1/runs/{method_run['id']}").get_json()
         assert method_result["status"] == "succeeded", method_result
+
+    quantifier_node["type"] = "acc"
+    graph["nodes"].extend(
+        [
+            {"id": "pacc", "type": "pacc", "version": 1, "config": {}},
+            {
+                "id": "pacc-protocol-evaluation",
+                "type": "protocol_evaluation",
+                "version": 1,
+                "config": {},
+            },
+            {"id": "comparison", "type": "comparison", "version": 1, "config": {}},
+        ]
+    )
+    graph["edges"].extend(
+        [
+            {
+                "id": "preprocessing-pacc",
+                "source": "preprocessing",
+                "source_port": "train",
+                "target": "pacc",
+                "target_port": "train",
+            },
+            {
+                "id": "classifier-pacc",
+                "source": "classifier",
+                "source_port": "classifier",
+                "target": "pacc",
+                "target_port": "classifier",
+            },
+            {
+                "id": "pacc-protocol",
+                "source": "pacc",
+                "source_port": "quantifier",
+                "target": "pacc-protocol-evaluation",
+                "target_port": "quantifier",
+            },
+            {
+                "id": "app-pacc-evaluation",
+                "source": "app",
+                "source_port": "protocol",
+                "target": "pacc-protocol-evaluation",
+                "target_port": "protocol",
+            },
+            {
+                "id": "acc-comparison",
+                "source": "protocol-evaluation",
+                "source_port": "report",
+                "target": "comparison",
+                "target_port": "evaluation_1",
+            },
+            {
+                "id": "pacc-comparison",
+                "source": "pacc-protocol-evaluation",
+                "source_port": "report",
+                "target": "comparison",
+                "target_port": "evaluation_2",
+            },
+        ]
+    )
+    comparison_workflow = client.post(
+        f"/api/v1/projects/{project_id}/workflows",
+        json={"name": "Paired ACC and PACC comparison", "graph": graph},
+    ).get_json()
+    comparison_run = client.post(
+        f"/api/v1/projects/{project_id}/runs",
+        json={"workflow_revision_id": comparison_workflow["draft_revision_id"], "seed": 7},
+    ).get_json()
+    assert worker.run_once()
+    comparison_run_result = client.get(f"/api/v1/runs/{comparison_run['id']}").get_json()
+    assert comparison_run_result["status"] == "succeeded", comparison_run_result
+    comparison_nodes = client.get(f"/api/v1/runs/{comparison_run['id']}/nodes").get_json()["items"]
+    comparison_node = next(node for node in comparison_nodes if node["node_type"] == "comparison")
+    comparison_json_id, comparison_html_id = comparison_node["output_artifact_ids"]
+    comparison = json.loads(client.get(f"/api/v1/artifacts/{comparison_json_id}/download").data)
+    assert comparison["protocol"] == "app"
+    assert comparison["paired_sample_ids"] == [
+        "sample-000000",
+        "sample-000001",
+        "sample-000002",
+    ]
+    assert {method["quantifier"] for method in comparison["methods"]} == {"acc", "pacc"}
+    assert [item["rank"] for item in comparison["rankings"]["mae"]] == [1, 2]
+    comparison_csv = client.get(f"/api/v1/artifacts/{comparison_json_id}/evaluation.csv")
+    assert comparison_csv.status_code == 200
+    assert b"method_id,quantifier,sample_id" in comparison_csv.data
+    rendered_comparison = client.get(f"/api/v1/artifacts/{comparison_html_id}/download")
+    assert b"Method ranking" in rendered_comparison.data
+    assert b"Binary diagnostics" in rendered_comparison.data
+    assert b"<svg" in rendered_comparison.data
+
+    selection_graph = {
+        "schema_version": 1,
+        "nodes": [
+            graph["nodes"][0],
+            {
+                "id": "selection-split",
+                "type": "split",
+                "version": 1,
+                "config": {"train_proportion": 0.6, "validation_proportion": 0.2},
+            },
+            {
+                "id": "selection-classifier",
+                "type": "classifier",
+                "version": 1,
+                "config": {"kind": "logistic_regression", "max_iter": 1000},
+            },
+            {
+                "id": "validation-app",
+                "type": "app",
+                "version": 1,
+                "config": {"sample_size": 4, "n_prevalences": 3, "repeats": 1},
+            },
+            {
+                "id": "selection",
+                "type": "model_selection",
+                "version": 1,
+                "config": {
+                    "method": "acc",
+                    "classifier_values": [0.1, 1.0],
+                    "error": "mae",
+                    "refit": True,
+                },
+            },
+            {"id": "held-out-evaluation", "type": "evaluation", "version": 1, "config": {}},
+        ],
+        "edges": [
+            {
+                "id": "dataset-selection-split",
+                "source": "dataset",
+                "source_port": "dataset",
+                "target": "selection-split",
+                "target_port": "dataset",
+            },
+            {
+                "id": "validation-app-source",
+                "source": "selection-split",
+                "source_port": "validation",
+                "target": "validation-app",
+                "target_port": "collection",
+            },
+            {
+                "id": "selection-training",
+                "source": "selection-split",
+                "source_port": "train",
+                "target": "selection",
+                "target_port": "train",
+            },
+            {
+                "id": "selection-classifier-spec",
+                "source": "selection-classifier",
+                "source_port": "classifier",
+                "target": "selection",
+                "target_port": "classifier",
+            },
+            {
+                "id": "selection-validation-protocol",
+                "source": "validation-app",
+                "source_port": "protocol",
+                "target": "selection",
+                "target_port": "validation_protocol",
+            },
+            {
+                "id": "selected-quantifier-evaluation",
+                "source": "selection",
+                "source_port": "quantifier",
+                "target": "held-out-evaluation",
+                "target_port": "quantifier",
+            },
+            {
+                "id": "held-out-test",
+                "source": "selection-split",
+                "source_port": "test",
+                "target": "held-out-evaluation",
+                "target_port": "test",
+            },
+        ],
+    }
+    selection_workflow = client.post(
+        f"/api/v1/projects/{project_id}/workflows",
+        json={"name": "Leakage-safe ACC selection", "graph": selection_graph},
+    ).get_json()
+    selection_run = client.post(
+        f"/api/v1/projects/{project_id}/runs",
+        json={"workflow_revision_id": selection_workflow["draft_revision_id"], "seed": 7},
+    ).get_json()
+    assert worker.run_once()
+    selection_run_result = client.get(f"/api/v1/runs/{selection_run['id']}").get_json()
+    assert selection_run_result["status"] == "succeeded", selection_run_result
+    selection_nodes = client.get(f"/api/v1/runs/{selection_run['id']}/nodes").get_json()["items"]
+    selection_node = next(
+        node for node in selection_nodes if node["node_type"] == "model_selection"
+    )
+    selection_split = next(node for node in selection_nodes if node["node_id"] == "selection-split")
+    selection_manifests = [
+        json.loads(client.get(f"/api/v1/artifacts/{artifact_id}/download").data)
+        for artifact_id in selection_split["output_artifact_ids"]
+    ]
+    assert [manifest["partition"] for manifest in selection_manifests] == [
+        "train",
+        "test",
+        "validation",
+    ]
+    train_indices = set(selection_manifests[0]["train_indices"])
+    test_indices = set(selection_manifests[0]["test_indices"])
+    validation_indices = set(selection_manifests[0]["validation_indices"])
+    assert train_indices.isdisjoint(test_indices)
+    assert train_indices.isdisjoint(validation_indices)
+    assert test_indices.isdisjoint(validation_indices)
+    assert train_indices | validation_indices | test_indices == set(range(24))
+    evidence = json.loads(
+        client.get(f"/api/v1/artifacts/{selection_node['output_artifact_ids'][1]}/download").data
+    )
+    assert evidence["parameter_grid"] == {"classifier__C": [0.1, 1.0]}
+    assert evidence["best_params"]["classifier__C"] in [0.1, 1.0]
+    assert evidence["n_jobs"] == 1
+    held_out = next(node for node in selection_nodes if node["node_id"] == "held-out-evaluation")
+    assert held_out["state"] == "succeeded"

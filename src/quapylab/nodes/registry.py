@@ -93,6 +93,7 @@ def default_registry() -> NodeRegistry:
                 outputs=(
                     PortDefinition("train", labelled),
                     PortDefinition("test", labelled),
+                    PortDefinition("validation", labelled, required=False),
                 ),
                 config_schema={
                     "type": "object",
@@ -102,7 +103,13 @@ def default_registry() -> NodeRegistry:
                             "minimum": 0.1,
                             "maximum": 0.9,
                             "default": 0.7,
-                        }
+                        },
+                        "validation_proportion": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 0.4,
+                            "default": 0,
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -270,6 +277,65 @@ def default_registry() -> NodeRegistry:
                 "Report",
                 "output",
                 inputs=(PortDefinition("evaluation", "evaluation_report"),),
+            ),
+            NodeDefinition(
+                "comparison",
+                1,
+                "Method comparison",
+                "output",
+                inputs=(
+                    PortDefinition("evaluation_1", "evaluation_report"),
+                    PortDefinition("evaluation_2", "evaluation_report"),
+                    PortDefinition("evaluation_3", "evaluation_report", required=False),
+                    PortDefinition("evaluation_4", "evaluation_report", required=False),
+                ),
+                outputs=(
+                    PortDefinition("comparison", "comparison_report"),
+                    PortDefinition("report", "report"),
+                ),
+                capabilities={"paired_samples": True, "maximum_methods": 4},
+            ),
+            NodeDefinition(
+                "model_selection",
+                1,
+                "GridSearchQ model selection",
+                "optimization",
+                inputs=(
+                    PortDefinition("train", labelled),
+                    PortDefinition("classifier", "classifier_spec"),
+                    PortDefinition("validation_protocol", "protocol"),
+                ),
+                outputs=(
+                    PortDefinition("quantifier", "fitted_quantifier"),
+                    PortDefinition("selection", "model_selection_result"),
+                ),
+                config_schema={
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "enum": ["acc", "pacc"],
+                            "default": "acc",
+                        },
+                        "classifier_values": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "default": [0.1, 1.0, 10.0],
+                        },
+                        "error": {
+                            "type": "string",
+                            "enum": ["mae", "mrae", "mse", "mkld", "mnkld", "mnae", "mnrae"],
+                            "default": "mae",
+                        },
+                        "refit": {"type": "boolean", "default": True},
+                    },
+                    "additionalProperties": False,
+                },
+                capabilities={
+                    "implementation": "quapy.model_selection.GridSearchQ",
+                    "n_jobs": 1,
+                    "validation_role": "required",
+                },
             ),
         )
     )

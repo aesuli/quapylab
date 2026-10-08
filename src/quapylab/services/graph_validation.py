@@ -72,6 +72,13 @@ def _validate_node_config(node_id: str, config: dict[str, Any], definition: Node
             continue
         if "enum" in property_schema and value not in property_schema["enum"]:
             details.append({"node_id": node_id, "field": name, "reason": "not_allowlisted"})
+        item_schema = property_schema.get("items")
+        if isinstance(value, list) and isinstance(item_schema, dict):
+            item_type = item_schema.get("type")
+            if isinstance(item_type, str) and any(
+                not _matches_type(item, item_type) for item in value
+            ):
+                details.append({"node_id": node_id, "field": name, "reason": "invalid_item_type"})
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if "minimum" in property_schema and value < property_schema["minimum"]:
                 details.append({"node_id": node_id, "field": name, "reason": "below_minimum"})
