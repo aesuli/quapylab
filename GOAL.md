@@ -23,18 +23,12 @@ The web interface uses an internal HTTP API for all Lab operations, including da
 
 Web deployments require authentication and enforce group authorization on every project resource and artifact. Desktop mode supplies an implicit local identity and private group to the same application services; it does not require login and must not accidentally enable remote access or multi-user administration.
 
-A stable automation API for scripts or CI systems may be added later. If added, it should cover the complete experiment lifecycle rather than dataset upload alone: submit data, create or select a workflow revision, trigger and cancel a run, inspect status, and download results.
+Production inference belongs to a separate future component, **QuaPy Model Server**. It loads a model bundle exported by QuaPy Lab, validates incoming batches against the bundle's input schema, and returns prevalence estimates. It must be independently deployable and must not contain the Lab's workflow editor, experiment runner, or dataset library.
 
-Production inference belongs to a separate future component, **QuaPy Model Server**. It loads an approved model bundle exported by QuaPy Lab, validates incoming batches against the bundle's input schema, and returns prevalence estimates. It must be independently deployable and must not contain the Lab's workflow editor, experiment runner, or dataset library.
-
-### Requirements
+### Platforms
 
 The application is implemented in Python.
 It may run standalone, starting its own localhost server, and it can also be run in a WSGI server.
 It can also be packaged as a single-file executable that runs in a native window, hiding its web application nature.
-Windows and Linux are required supported platforms. Platform-specific executables are built and tested separately on each operating system; Windows is the initial development target, not the only release target.
-
-### Steps
-
-* Write a high-level list of features of the applications and subgoals. 
+Windows, Linux, and MacOS are required supported platforms. Platform-specific executables are built and tested separately on each operating system.
 

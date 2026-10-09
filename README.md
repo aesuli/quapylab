@@ -1,19 +1,18 @@
 # QuaPy Lab
 
-QuaPy Lab is a local-first visual workbench for reproducible quantification experiments backed by [QuaPy](https://github.com/HLT-ISTI/QuaPy).
+QuaPy Lab is a visual workbench for reproducible quantification experiments backed by [QuaPy](https://github.com/HLT-ISTI/QuaPy).
 
-It has two deployment modes: a passwordless personal desktop mode and an authenticated multi-user web mode where groups share projects through role-based permissions. The foundation currently includes local accounts, server-side sessions, CSRF protection, group roles, projects, immutable workflow revisions, dataset artifacts, and a minimal queued runtime.
+It has two deployment modes: a passwordless personal desktop mode and an authenticated multi-user web mode where groups share projects through role-based permissions. 
 
-Phase 1 foundation work is underway. See [GOAL.md](GOAL.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the product boundary and roadmap.
+See also [GOAL.md](GOAL.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ## Development baseline
 
 - Python 3.11–3.13 (3.11 is the primary target)
 - Node.js 20 or newer
-- Windows is the first development and native packaging target
 - Standalone desktop releases are built natively for Windows, Linux, and macOS
 
-Create and activate a Python 3.11 virtual environment, then install the project:
+Create and activate a Python 3.11 virtual environment, then install the project (on windows):
 
 ```powershell
 py -3.11 -m venv .venv
@@ -27,7 +26,7 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev,desktop]'
 ```
 
-The Linux desktop build also needs a pywebview-compatible GTK/WebKit or Qt runtime supplied by the distribution. The exact supported backend and package list will be pinned and tested in Linux CI before the MVP release. The standalone server and WSGI modes do not require a desktop webview.
+The Linux desktop build also needs a pywebview-compatible GTK/WebKit or Qt runtime supplied by the distribution. The standalone server and WSGI modes do not require a desktop webview.
 
 Run the backend:
 
@@ -36,7 +35,7 @@ Run the backend:
 ```
 
 Run the authenticated multi-user web mode locally (SQLite is suitable for local
-testing; supported multi-user deployments require PostgreSQL):
+testing; supported multi-user deployments may require PostgreSQL):
 
 ```powershell
 $env:QUAPYLAB_MODE = "web"
@@ -97,17 +96,21 @@ Run the direct QuaPy compatibility experiment:
 .venv\Scripts\python examples/reference_experiment.py
 ```
 
-Build the Windows one-file architecture spike after building the frontend:
+Build the Windows executable:
 
 ```powershell
 .venv\Scripts\pyinstaller --noconfirm --clean packaging\QuaPyLab.spec
 dist\QuaPyLab.exe --smoke-test
 ```
 
-PyInstaller artifacts must be built on their target operating system. The maintained spec produces `dist/QuaPyLab.exe` on Windows and `dist/QuaPyLab` on Linux and macOS; release builds are validated in native CI rather than cross-compiled.
+PyInstaller artifacts must be built on their target operating system. The command produces `dist/QuaPyLab.exe` on Windows and `dist/QuaPyLab` on Linux and macOS.
 
 ## Desktop releases
 
 Each push to `main` creates a GitHub release with one platform-native archive for
 Windows, Linux, and macOS. Each archive contains the single-file QuaPy Lab
-executable, this README, and the AGPL-3.0-only license.
+executable, this README, and the license.
+
+## License
+
+See the [LICENSE](LICENSE) file.
