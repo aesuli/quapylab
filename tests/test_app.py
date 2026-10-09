@@ -88,6 +88,18 @@ def test_desktop_mode_exposes_a_stable_implicit_actor() -> None:
         assert g.actor.deployment_mode == "desktop"
 
 
+def test_runtime_environment_selects_web_mode(monkeypatch) -> None:
+    monkeypatch.setenv("QUAPYLAB_MODE", "web")
+    monkeypatch.setenv("QUAPYLAB_DATABASE_URL", "sqlite+pysqlite:///:memory:")
+
+    application = create_app({"TESTING": True})
+
+    assert application.extensions["quapylab.config"].mode is DeploymentMode.WEB
+    assert (
+        application.extensions["quapylab.config"].database_url == "sqlite+pysqlite:///:memory:"
+    )
+
+
 def test_node_types_are_published_by_the_server() -> None:
     client = create_app({"TESTING": True}).test_client()
 
@@ -142,6 +154,15 @@ def test_web_mode_is_explicit() -> None:
     application = create_app({"TESTING": True, "QUAPYLAB_MODE": "web"})
 
     assert application.extensions["quapylab.config"].mode is DeploymentMode.WEB
+
+
+def test_web_mode_serves_the_frontend_but_protects_the_api() -> None:
+    client = create_app({"TESTING": True, "QUAPYLAB_MODE": "web"}).test_client()
+
+    assert client.get("/").status_code == 200
+    assert client.get("/api/v1/auth/session").status_code == 401
+    assert client.get("/api/v1/node-types").status_code == 401
+    assert client.get("/api/v1/does-not-exist").status_code == 404
 
 
 def test_desktop_session_is_implicit_without_identity_controls() -> None:

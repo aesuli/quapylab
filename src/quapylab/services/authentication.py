@@ -11,7 +11,7 @@ from uuid import UUID
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from quapylab.domain.actor import ActorContext
@@ -165,6 +165,30 @@ class AuthenticationService:
         credential.password_hash = self._passwords.hash(new_password)
         credential.password_changed_at = datetime.now(UTC)
         credential.password_change_required = False
+
+    def set_password(self, session: Session, *, user_id: str, new_password: str) -> None:
+        """Overwrite a user's password without the current one and end all their sessions."""
+        self._validate_password(new_password)
+        if session.get(User, user_id) is None:
+            raise ValueError("User does not exist.")
+        now = utc_now()
+        password_hash = self._passwords.hash(new_password)
+        credential = session.get(LocalCredential, user_id)
+        if credential is None:
+            session.add(LocalCredential(user_id=user_id, password_hash=password_hash))
+        else:
+            credential.password_hash = password_hash
+            credential.password_changed_at = now
+            credential.password_change_required = False
+        session.execute(
+            update(WebSession)
+            .where(WebSession.user_id == user_id, WebSession.revoked_at.is_(None))
+            .values(revoked_at=now)
+        )
+
+    @staticmethod
+    def find_user(session: Session, login_name: str) -> User | None:
+        return session.scalar(select(User).where(User.login_name == login_name.strip().lower()))
 
     def _new_session(self, session: Session, user_id: str, now: datetime) -> WebSession:
         web_session = WebSession(

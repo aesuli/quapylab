@@ -963,7 +963,7 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
       setError(reason instanceof Error ? reason.message : "Could not download artifact.");
     }
   }
-  async function exportWorkflow(kind: "workflow-json" | "workflow-python", includeDatasets = false) {
+  async function exportWorkflow(kind: "workflow-json" | "workflow-python" | "workflow-quapy-python", includeDatasets = false) {
     if (!active) return;
     try {
       const nativeApi = (window as Window & { pywebview?: { api?: NativeDownloadApi } }).pywebview?.api;
@@ -972,7 +972,7 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
         if (!result.saved && !result.cancelled) throw new Error(result.error || "Export failed.");
         return;
       }
-      const path = kind === "workflow-json" ? `/api/v1/workflows/${active.id}/export` : `/api/v1/workflows/${active.id}/export/python${includeDatasets ? "?include_datasets=true" : ""}`;
+      const path = kind === "workflow-json" ? `/api/v1/workflows/${active.id}/export` : kind === "workflow-quapy-python" ? `/api/v1/workflows/${active.id}/export/quapy-python${includeDatasets ? "?include_datasets=true" : ""}` : `/api/v1/workflows/${active.id}/export/python${includeDatasets ? "?include_datasets=true" : ""}`;
       const response = await fetch(path, { credentials: "same-origin" });
       if (!response.ok) throw new Error("Export failed.");
       const disposition = response.headers.get("Content-Disposition") || "";
@@ -1030,6 +1030,8 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
         {active && <button onClick={() => void exportWorkflow("workflow-json")}>Export JSON</button>}
         {active && <button onClick={() => void exportWorkflow("workflow-python")}>Export Python</button>}
         {active && <button onClick={() => void exportWorkflow("workflow-python", true)}>Python + datasets ZIP</button>}
+        {active && <button onClick={() => void exportWorkflow("workflow-quapy-python")}>Export QuaPy Python</button>}
+        {active && <button onClick={() => void exportWorkflow("workflow-quapy-python", true)}>QuaPy Python + datasets ZIP</button>}
         <button disabled={!editable || undoStack.length === 0} onClick={undo}>
           Undo
         </button>

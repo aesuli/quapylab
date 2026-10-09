@@ -35,6 +35,42 @@ Run the backend:
 .venv\Scripts\python -m quapylab serve --debug
 ```
 
+Run the authenticated multi-user web mode locally (SQLite is suitable for local
+testing; supported multi-user deployments require PostgreSQL):
+
+```powershell
+$env:QUAPYLAB_MODE = "web"
+$env:QUAPYLAB_DATABASE_URL = "sqlite+pysqlite:///./.quapylab/web.sqlite3"
+.venv\Scripts\python -m quapylab bootstrap-admin `
+  --database-url $env:QUAPYLAB_DATABASE_URL `
+  --login-name admin `
+  --display-name "Administrator" `
+  --password "choose-a-password"
+.venv\Scripts\python -m quapylab serve --debug
+```
+
+The environment variables apply to commands run in that PowerShell session.
+`serve` does not prompt for a password; create the initial administrator with
+`bootstrap-admin` first, then sign in at `http://127.0.0.1:8765`.
+
+User management in web mode:
+
+- Administrators open **Account** in the top bar to create and delete users and
+  to reset any user's password (the target is signed out).
+- Every user can change their own password from **Account**.
+- Passwords must have at least 12 characters.
+- Deleting a user is refused for yourself and for sole owners of a shared group;
+  the user's personal workspace becomes inaccessible.
+
+Set or overwrite a password from the command line (also signs the user out):
+
+```powershell
+.venv\Scripts\python -m quapylab set-password `
+  --database-url $env:QUAPYLAB_DATABASE_URL `
+  --login-name admin `
+  --password "a-new-password"
+```
+
 Open the same application in a native window:
 
 ```powershell

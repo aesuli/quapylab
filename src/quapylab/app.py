@@ -4,6 +4,7 @@ import csv
 import hmac
 import io
 import json
+import os
 import re
 import tempfile
 from collections.abc import Mapping
@@ -12,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from flask import Flask, Response, abort, g, jsonify, request
+from sqlalchemy import select
 
 from quapylab import __version__
 from quapylab.config import ApplicationConfig, DeploymentMode
@@ -34,6 +36,7 @@ from quapylab.services.groups import GroupService
 from quapylab.services.portability import PortabilityService
 from quapylab.services.projects import ProjectService
 from quapylab.services.runs import RunService
+from quapylab.services.users import UserService
 from quapylab.services.workspace import bootstrap_desktop_workspace
 from quapylab.workflow.schemas import WorkflowSpec
 
@@ -45,6 +48,13 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
         MAX_CONTENT_LENGTH=256 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
+    )
+    app.config.from_mapping(
+        {
+            key: os.environ[key]
+            for key in ("QUAPYLAB_MODE", "QUAPYLAB_DATABASE_URL")
+            if key in os.environ
+        }
     )
     if config:
         app.config.from_mapping(config)
@@ -61,6 +71,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     database.create_schema()
     app.extensions["quapylab.database"] = database
     app.extensions["quapylab.authentication"] = AuthenticationService()
+    app.extensions["quapylab.users"] = UserService(app.extensions["quapylab.authentication"])
     app.extensions["quapylab.login_throttle"] = LoginThrottle()
     app.extensions["quapylab.projects"] = ProjectService()
     app.extensions["quapylab.groups"] = GroupService()
@@ -94,7 +105,8 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
         if application_config.mode is DeploymentMode.DESKTOP:
             g.actor = desktop_actor()
             return
-        if request.endpoint in {"health_live", "login"}:
+        # The frontend shell must load unauthenticated so it can render the login form.
+        if request.endpoint in {"health_live", "login", "frontend_index", "frontend_resource"}:
             return
         authentication: AuthenticationService = app.extensions["quapylab.authentication"]
         with database.transaction() as session:
@@ -239,6 +251,74 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 )
         except (AuthenticationError, ValueError) as error:
             return api_error("password_change_failed", str(error), 400)
+        return jsonify({"changed": True}), 200
+
+    @app.route("/api/v1/users", methods=["GET", "POST"])
+    def users() -> tuple[Any, int]:
+        service: UserService = app.extensions["quapylab.users"]
+        with database.transaction() as session:
+            if request.method == "GET":
+                return jsonify(
+                    {"items": [user_json(item) for item in service.list_users(session, actor=g.actor)]}
+                ), 200
+            payload = request_json()
+            login_name = payload.get("login_name")
+            display_name = payload.get("display_name", "")
+            password = payload.get("password")
+            if (
+                not isinstance(login_name, str)
+                or not isinstance(display_name, str)
+                or not isinstance(password, str)
+            ):
+                return api_error("invalid_request", "Login name and password are required.", 400)
+            try:
+                user = service.create_user(
+                    session,
+                    actor=g.actor,
+                    login_name=login_name,
+                    display_name=display_name,
+                    password=password,
+                    is_system_administrator=payload.get("is_system_administrator") is True,
+                )
+            except ValueError as error:
+                return api_error("invalid_request", str(error), 400)
+            return jsonify(user_json(user)), 201
+
+    @app.get("/api/v1/users/directory")
+    def user_directory() -> tuple[Any, int]:
+        if g.actor.deployment_mode != "web":
+            return api_error("not_found", "Resource not found.", 404)
+        with database.transaction() as session:
+            rows = session.scalars(select(User).where(User.is_active.is_(True)).order_by(User.login_name))
+            items = [
+                {"id": user.id, "login_name": user.login_name, "display_name": user.display_name}
+                for user in rows
+            ]
+        return jsonify({"items": items}), 200
+
+    @app.delete("/api/v1/users/<user_id>")
+    def delete_user(user_id: str) -> tuple[Any, int]:
+        service: UserService = app.extensions["quapylab.users"]
+        try:
+            with database.transaction() as session:
+                service.delete_user(session, actor=g.actor, user_id=user_id)
+        except ValueError as error:
+            return api_error("invalid_request", str(error), 400)
+        return "", 204
+
+    @app.post("/api/v1/users/<user_id>/password")
+    def reset_user_password(user_id: str) -> tuple[Any, int]:
+        new_password = request_json().get("new_password")
+        if not isinstance(new_password, str):
+            return api_error("invalid_request", "A new password is required.", 400)
+        service: UserService = app.extensions["quapylab.users"]
+        try:
+            with database.transaction() as session:
+                service.set_password(
+                    session, actor=g.actor, user_id=user_id, new_password=new_password
+                )
+        except ValueError as error:
+            return api_error("invalid_request", str(error), 400)
         return jsonify({"changed": True}), 200
 
     @app.get("/api/v1/node-types")
@@ -705,6 +785,26 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
+    @app.get("/api/v1/workflows/<workflow_id>/export/quapy-python")
+    def export_workflow_quapy_python(workflow_id: str) -> Response:
+        include_datasets = request.args.get("include_datasets", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        service: PortabilityService = app.extensions["quapylab.portability"]
+        with database.transaction() as session:
+            content, filename, media_type = service.quapy_python_export(
+                session,
+                actor=g.actor,
+                workflow_id=workflow_id,
+                include_datasets=include_datasets,
+            )
+        response = Response(content, mimetype=media_type)
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
     @app.route("/api/v1/workflows/<workflow_id>", methods=["GET", "PATCH", "DELETE"])
     def workflow(workflow_id: str) -> tuple[Any, int]:
         service: ProjectService = app.extensions["quapylab.projects"]
@@ -875,6 +975,16 @@ def group_json(group: Any, membership: Any | None) -> dict[str, Any]:
     if membership is not None:
         item["role"] = membership.role
     return item
+
+
+def user_json(user: User) -> dict[str, Any]:
+    return {
+        "id": user.id,
+        "login_name": user.login_name,
+        "display_name": user.display_name,
+        "is_system_administrator": user.is_system_administrator,
+        "is_active": user.is_active,
+    }
 
 
 def membership_json(membership: Any, user: User | None = None) -> dict[str, Any]:

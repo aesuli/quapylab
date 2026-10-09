@@ -38,6 +38,9 @@ class NativeDesktopBridge:
         elif kind == "workflow-python":
             suffix = "?include_datasets=true" if include_datasets else ""
             path = f"/api/v1/workflows/{resource_id}/export/python{suffix}"
+        elif kind == "workflow-quapy-python":
+            suffix = "?include_datasets=true" if include_datasets else ""
+            path = f"/api/v1/workflows/{resource_id}/export/quapy-python{suffix}"
         else:
             return {"saved": False, "error": "Unsupported export type."}
         response = self._application.test_client().get(path)

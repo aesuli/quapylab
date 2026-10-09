@@ -8,6 +8,14 @@ type Session = {
   user_id: string;
   active_group_id: string;
   csrf_token: string | null;
+  is_system_administrator?: boolean;
+};
+type ManagedUser = {
+  id: string;
+  login_name: string;
+  display_name: string;
+  is_system_administrator: boolean;
+  is_active: boolean;
 };
 type Project = {
   id: string;
@@ -106,6 +114,167 @@ function Login({ onAuthenticated }: { onAuthenticated: (session: Session) => voi
   );
 }
 
+function AccountPanel({ session, close }: { session: Session; close: () => void }) {
+  const admin = Boolean(session.is_system_administrator);
+  const json = { "Content-Type": "application/json", ...csrf(session) };
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [loginName, setLoginName] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [password, setPassword] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const reloadUsers = async () => setUsers((await request<{ items: ManagedUser[] }>("/api/v1/users")).items);
+  useEffect(() => {
+    if (admin) void reloadUsers().catch((reason) => setError(errorText(reason, "Could not load users.")));
+  }, [admin]);
+  async function run(action: () => Promise<void>, fallback: string, done?: string) {
+    setError(null);
+    setMessage(null);
+    try {
+      await action();
+      if (done) setMessage(done);
+    } catch (reason) {
+      setError(errorText(reason, fallback));
+    }
+  }
+  async function changePassword(event: FormEvent) {
+    event.preventDefault();
+    if (next !== confirm) {
+      setError("The new passwords do not match.");
+      return;
+    }
+    await run(
+      async () => {
+        await request("/api/v1/auth/password", { method: "POST", headers: json, body: JSON.stringify({ current_password: current, new_password: next }) });
+        setCurrent("");
+        setNext("");
+        setConfirm("");
+      },
+      "Could not change the password.",
+      "Password changed.",
+    );
+  }
+  async function createUser(event: FormEvent) {
+    event.preventDefault();
+    await run(
+      async () => {
+        await request("/api/v1/users", {
+          method: "POST",
+          headers: json,
+          body: JSON.stringify({ login_name: loginName, display_name: displayName || loginName, password, is_system_administrator: isAdmin }),
+        });
+        setLoginName("");
+        setDisplayName("");
+        setPassword("");
+        setIsAdmin(false);
+        await reloadUsers();
+      },
+      "Could not create the user.",
+      "User created.",
+    );
+  }
+  async function resetPassword(user: ManagedUser) {
+    const value = window.prompt(`New password for ${user.login_name} (at least 12 characters). Their sessions will be signed out.`);
+    if (!value) return;
+    await run(
+      () => request<void>(`/api/v1/users/${user.id}/password`, { method: "POST", headers: json, body: JSON.stringify({ new_password: value }) }),
+      "Could not reset the password.",
+      `Password reset for ${user.login_name}.`,
+    );
+  }
+  async function deleteUser(user: ManagedUser) {
+    if (!window.confirm(`Delete user ${user.login_name}? Their personal workspace becomes inaccessible.`)) return;
+    await run(
+      async () => {
+        await request<void>(`/api/v1/users/${user.id}`, { method: "DELETE", headers: csrf(session) });
+        await reloadUsers();
+      },
+      "Could not delete the user.",
+      `User ${user.login_name} deleted.`,
+    );
+  }
+  return (
+    <aside className="members-panel account-panel" aria-label="Account">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Account</p>
+          <h2>Settings</h2>
+        </div>
+        <button className="panel-close" aria-label="Close account panel" onClick={close}>
+          ×
+        </button>
+      </div>
+      {error && <Notice dismiss={() => setError(null)}>{error}</Notice>}
+      {message && <p className="panel-copy" role="status">{message}</p>}
+      <form className="member-form" onSubmit={changePassword}>
+        <h3>Change my password</h3>
+        <label>
+          Current password
+          <input required type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} />
+        </label>
+        <label>
+          New password (min. 12 characters)
+          <input required minLength={12} type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />
+        </label>
+        <label>
+          Confirm new password
+          <input required type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+        </label>
+        <button type="submit">Change password</button>
+      </form>
+      {admin && (
+        <>
+          <div className="member-list">
+            <h3>Users</h3>
+            {users.map((user) => (
+              <div className="user-row" key={user.id}>
+                <div>
+                  <strong>{user.display_name || user.login_name}</strong>
+                  <span>
+                    @{user.login_name}
+                    {user.is_system_administrator ? " · admin" : ""}
+                  </span>
+                </div>
+                <button className="quiet-button dark" onClick={() => void resetPassword(user)}>
+                  Reset password
+                </button>
+                {user.id !== session.user_id && (
+                  <button className="icon-button danger" aria-label={`Delete ${user.login_name}`} onClick={() => void deleteUser(user)}>
+                    ×
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <form className="member-form" onSubmit={createUser}>
+            <h3>Create user</h3>
+            <label>
+              Login name
+              <input required autoComplete="off" value={loginName} onChange={(e) => setLoginName(e.target.value)} />
+            </label>
+            <label>
+              Display name
+              <input autoComplete="off" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+            </label>
+            <label>
+              Initial password (min. 12 characters)
+              <input required minLength={12} type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </label>
+            <label className="checkbox-label">
+              <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} /> Administrator
+            </label>
+            <button type="submit">Create user</button>
+          </form>
+        </>
+      )}
+    </aside>
+  );
+}
+
 function Members({ session, group, members, close, reload }: { session: Session; group: Group; members: Member[]; close: () => void; reload: () => Promise<void> }) {
   const [userId, setUserId] = useState("");
   const [role, setRole] = useState<Role>("editor");
@@ -113,6 +282,14 @@ function Members({ session, group, members, close, reload }: { session: Session;
   const owner = group.role === "owner";
   const manages = owner || group.role === "administrator";
   const choices = roles;
+  const [directory, setDirectory] = useState<{ id: string; login_name: string; display_name: string }[]>([]);
+  useEffect(() => {
+    if (!manages) return;
+    request<{ items: typeof directory }>("/api/v1/users/directory")
+      .then((result) => setDirectory(result.items))
+      .catch((reason) => setError(errorText(reason, "Could not load users.")));
+  }, [manages]);
+  const candidates = directory.filter((user) => !members.some((member) => member.user_id === user.id));
   async function add(event: FormEvent) {
     event.preventDefault();
     setError(null);
@@ -196,8 +373,15 @@ function Members({ session, group, members, close, reload }: { session: Session;
         <form className="member-form" onSubmit={add}>
           <h3>Add existing user</h3>
           <label>
-            User ID
-            <input required value={userId} placeholder="User UUID" onChange={(e) => setUserId(e.target.value)} />
+            User
+            <select required value={userId} onChange={(e) => setUserId(e.target.value)}>
+              <option value="">Select a user…</option>
+              {candidates.map((user) => (
+                <option key={user.id} value={user.id}>
+                  {user.display_name && user.display_name !== user.login_name ? `${user.display_name} (@${user.login_name})` : `@${user.login_name}`}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
             Role
@@ -288,6 +472,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const [creating, setCreating] = useState(false);
   const [groupForm, setGroupForm] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [groupName, setGroupName] = useState("");
   const active = useMemo(() => groups.find((group) => group.id === activeId), [groups, activeId]);
@@ -454,9 +639,14 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           <h1>QuaPy Lab</h1>
         </div>
         {session.deployment_mode === "web" && (
-          <button className="quiet-button" onClick={onLogout}>
-            Sign out
-          </button>
+          <div className="topbar-actions">
+            <button className="quiet-button" onClick={() => setAccountOpen(true)}>
+              Account
+            </button>
+            <button className="quiet-button" onClick={onLogout}>
+              Sign out
+            </button>
+          </div>
         )}
       </header>
       <section className="workspace">
@@ -572,6 +762,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
             <p>Select a project to edit a versioned workflow.</p>
           </section>
         )}
+        {accountOpen && <AccountPanel session={session} close={() => setAccountOpen(false)} />}
         {membersOpen && active && <Members session={session} group={active} members={members} close={() => setMembersOpen(false)} reload={reloadMembers} />}
         {settingsProject && (
           <ProjectSettings

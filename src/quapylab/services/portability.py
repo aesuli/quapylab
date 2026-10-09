@@ -18,6 +18,7 @@ from quapylab.persistence.models import Dataset, Project, Workflow
 from quapylab.services.artifacts import ArtifactService
 from quapylab.services.datasets import DatasetService
 from quapylab.services.projects import ProjectService
+from quapylab.services.quapy_export import generate_quapy_script
 from quapylab.workflow.schemas import WorkflowSpec
 
 FORMAT = "quapylab-portable"
@@ -147,6 +148,32 @@ class PortabilityService:
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr(f"{stem}.py", script)
             archive.writestr("workflow.json", json.dumps(manifest, indent=2))
+            for descriptor in descriptors:
+                content = descriptor.get("content_base64")
+                if content:
+                    archive.writestr(descriptor["expected_path"], base64.b64decode(content))
+        return output.getvalue(), f"{stem}.zip", "application/zip"
+
+    def quapy_python_export(
+        self,
+        session: Session,
+        *,
+        actor: ActorContext,
+        workflow_id: str,
+        include_datasets: bool,
+    ) -> tuple[bytes, str, str]:
+        manifest = self.export_workflow(session, actor=actor, workflow_id=workflow_id)
+        workflow = manifest["workflow"]
+        descriptors = self._dataset_descriptors(
+            session, actor, workflow["graph"], include_content=include_datasets
+        )
+        script = generate_quapy_script(workflow["name"], workflow["graph"], descriptors)
+        stem = f"{_safe_name(workflow['name'])}-quapy"
+        if not include_datasets:
+            return script.encode(), f"{stem}.py", "text/x-python"
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(f"{stem}.py", script)
             for descriptor in descriptors:
                 content = descriptor.get("content_base64")
                 if content:

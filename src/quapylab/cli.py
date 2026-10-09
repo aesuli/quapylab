@@ -34,6 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--display-name", required=True)
     bootstrap.add_argument("--password", required=True)
 
+    set_password = subparsers.add_parser(
+        "set-password", help="overwrite the password of an existing web user"
+    )
+    set_password.add_argument("--database-url", required=True)
+    set_password.add_argument("--login-name", required=True)
+    set_password.add_argument("--password", required=True)
+
     worker = subparsers.add_parser("worker", help="run the local workflow worker")
     worker.add_argument("--database-url", required=True)
     worker.add_argument("--once", action="store_true", help="process at most one queued run")
@@ -66,6 +73,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         database = Database(args.database_url)
         database.create_schema()
         with database.transaction() as session:
+            if AuthenticationService.find_user(session, args.login_name) is not None:
+                print(
+                    f"User {args.login_name} already exists; "
+                    "use the set-password command to overwrite its password."
+                )
+                return 1
             user = AuthenticationService().create_user(
                 session,
                 login_name=args.login_name,
@@ -74,6 +87,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 is_system_administrator=True,
             )
         print(f"Created system administrator {user.login_name}.")
+        return 0
+    if args.command == "set-password":
+        database = Database(args.database_url)
+        database.create_schema()
+        authentication = AuthenticationService()
+        with database.transaction() as session:
+            user = authentication.find_user(session, args.login_name)
+            if user is None:
+                print(f"User {args.login_name} does not exist.")
+                return 1
+            try:
+                authentication.set_password(session, user_id=user.id, new_password=args.password)
+            except ValueError as error:
+                print(error)
+                return 1
+        print(f"Password updated for {user.login_name}; existing sessions were signed out.")
         return 0
     if args.command == "worker":
         if args.poll_seconds <= 0:

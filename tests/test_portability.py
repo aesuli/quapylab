@@ -30,6 +30,11 @@ def test_workflow_json_and_python_exports_round_trip() -> None:
     assert script.status_code == 200
     assert b"WORKFLOW = json.loads" in script.data
     compile(script.data, "Baseline.py", "exec")
+    quapy_script = client.get(f"/api/v1/workflows/{workflow['id']}/export/quapy-python")
+    assert quapy_script.status_code == 200
+    compile(quapy_script.data, "Baseline-quapy.py", "exec")
+    assert b"import quapy as qp" in quapy_script.data
+    assert b"import quapylab" not in quapy_script.data
     bundle = client.get(f"/api/v1/workflows/{workflow['id']}/export/python?include_datasets=true")
     with zipfile.ZipFile(io.BytesIO(bundle.data)) as archive:
         assert {"Baseline.py", "workflow.json"} <= set(archive.namelist())
