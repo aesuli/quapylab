@@ -6,13 +6,15 @@ It has two deployment modes: a passwordless personal desktop mode and an authent
 
 See also [GOAL.md](GOAL.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
-## Development baseline
+## Setup
 
+Requirements:
 - Python 3.11–3.13 (3.11 is the primary target)
 - Node.js 20 or newer
-- Standalone desktop releases are built natively for Windows, Linux, and macOS
 
-Create and activate a Python 3.11 virtual environment, then install the project (on windows):
+Create and activate a Python 3.11 virtual environment, then install the project.
+
+On Windows:
 
 ```powershell
 py -3.11 -m venv .venv
@@ -35,7 +37,9 @@ Run the backend:
 ```
 
 Run the authenticated multi-user web mode locally (SQLite is suitable for local
-testing; supported multi-user deployments may require PostgreSQL):
+testing; supported multi-user deployments may require PostgreSQL).
+
+On Windows, using powershell:
 
 ```powershell
 $env:QUAPYLAB_MODE = "web"
@@ -48,7 +52,20 @@ $env:QUAPYLAB_DATABASE_URL = "sqlite+pysqlite:///./.quapylab/web.sqlite3"
 .venv\Scripts\python -m quapylab serve --debug
 ```
 
-The environment variables apply to commands run in that PowerShell session.
+On Linux:
+
+```bash
+export QUAPYLAB_MODE="web"
+export QUAPYLAB_DATABASE_URL="sqlite+pysqlite:///./.quapylab/web.sqlite3"
+.venv/bin/python -m quapylab bootstrap-admin \
+  --database-url "$QUAPYLAB_DATABASE_URL" \
+  --login-name admin \
+  --display-name "Administrator" \
+  --password "choose-a-password"
+.venv/bin/python -m quapylab serve --debug
+```
+
+The environment variables apply to commands run in that shell session.
 `serve` does not prompt for a password; create the initial administrator with
 `bootstrap-admin` first, then sign in at `http://127.0.0.1:8765`.
 
@@ -70,7 +87,7 @@ Set or overwrite a password from the command line (also signs the user out):
   --password "a-new-password"
 ```
 
-Open the same application in a native window:
+Run the QuaPy Lab in a native window:
 
 ```powershell
 .venv\Scripts\python -m quapylab desktop
@@ -101,6 +118,13 @@ Build the Windows executable:
 ```powershell
 .venv\Scripts\pyinstaller --noconfirm --clean packaging\QuaPyLab.spec
 dist\QuaPyLab.exe --smoke-test
+```
+
+Build the Linux executable:
+
+```bash
+.venv/bin/pyinstaller --noconfirm --clean packaging/QuaPyLab.spec
+dist/QuaPyLab --smoke-test
 ```
 
 PyInstaller artifacts must be built on their target operating system. The command produces `dist/QuaPyLab.exe` on Windows and `dist/QuaPyLab` on Linux and macOS.
