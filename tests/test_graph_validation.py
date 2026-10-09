@@ -14,8 +14,9 @@ def workflow() -> dict[str, object]:
                 "config": {"dataset_version_id": "00000000-0000-0000-0000-000000000001"},
             },
             {"id": "split", "type": "split", "version": 1},
-            {"id": "classifier", "type": "classifier", "version": 1},
+            {"id": "classifier", "type": "logistic_regression", "version": 1},
             {"id": "acc", "type": "acc", "version": 1},
+            {"id": "fit", "type": "fit_quantifier", "version": 1},
             {"id": "evaluation", "type": "evaluation", "version": 1},
         ],
         "edges": [
@@ -34,11 +35,18 @@ def workflow() -> dict[str, object]:
                 "target_port": "dataset",
             },
             {
-                "id": "split-acc",
+                "id": "split-fit",
                 "source": "split",
                 "source_port": "train",
-                "target": "acc",
+                "target": "fit",
                 "target_port": "train",
+            },
+            {
+                "id": "acc-fit",
+                "source": "acc",
+                "source_port": "quantifier",
+                "target": "fit",
+                "target_port": "quantifier",
             },
             {
                 "id": "split-evaluation",
@@ -49,7 +57,7 @@ def workflow() -> dict[str, object]:
             },
             {
                 "id": "acc-evaluation",
-                "source": "acc",
+                "source": "fit",
                 "source_port": "quantifier",
                 "target": "evaluation",
                 "target_port": "quantifier",
@@ -65,7 +73,7 @@ def test_valid_workflow_returns_deterministic_compilation_order() -> None:
 
     assert response.status_code == 200
     assert response.get_json() == {
-        "topological_order": ["classifier", "dataset", "split", "acc", "evaluation"],
+        "topological_order": ["classifier", "acc", "dataset", "split", "fit", "evaluation"],
         "valid": True,
     }
 
@@ -108,8 +116,7 @@ def test_cycles_are_rejected_before_compilation() -> None:
 @pytest.mark.parametrize(
     ("node_id", "config", "field", "reason"),
     [
-        ("classifier", {"kind": "module.CustomClassifier"}, "kind", "not_allowlisted"),
-        ("classifier", {"kind": "logistic_regression", "c": 0}, "c", "below_exclusive_minimum"),
+        ("classifier", {"c": 0}, "c", "below_exclusive_minimum"),
         ("split", {"train_proportion": 1.0}, "train_proportion", "above_maximum"),
         ("classifier", {"unknown": True}, "unknown", "unsupported"),
     ],

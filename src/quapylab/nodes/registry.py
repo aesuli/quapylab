@@ -57,6 +57,121 @@ class NodeRegistry:
         ]
 
 
+def _val_split(default: int | None) -> dict[str, Any]:
+    return {
+        "title": "Classifier validation split",
+        "description": (
+            "Integer cross-validation folds, a fraction in (0,1), or empty for no split."
+        ),
+        "type": ["number", "null"],
+        "exclusiveMinimum": 0,
+        "default": default,
+    }
+
+
+def _quantifier_schema(method: str) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "fit_classifier": {
+            "type": "boolean",
+            "default": True,
+            "readOnly": True,
+            "description": (
+                "Always enabled because classifier nodes provide an unfitted specification."
+            ),
+        }
+    }
+    if method in {"acc", "pacc", "emq", "dmy"}:
+        properties["n_jobs"] = {
+            "type": "integer",
+            "default": 1,
+            "readOnly": True,
+            "description": "Fixed by the local resource policy to prevent nested parallelism.",
+        }
+    if method in {"pcc", "emq"}:
+        properties["val_split"] = _val_split(None)
+    elif method in {"acc", "pacc", "hdy", "dmy"}:
+        properties["val_split"] = _val_split(5)
+    if method in {"acc", "pacc"}:
+        properties.update(
+            {
+                "solver": {
+                    "type": "string",
+                    "enum": ["minimize", "exact-raise", "exact-cc"],
+                    "default": "minimize",
+                },
+                "method": {
+                    "title": "Adjustment method",
+                    "type": "string",
+                    "enum": ["inversion", "invariant-ratio"],
+                    "default": "inversion",
+                },
+                "norm": {
+                    "title": "Prevalence normalization",
+                    "type": "string",
+                    "enum": ["clip", "mapsimplex", "condsoftmax"],
+                    "default": "clip",
+                },
+            }
+        )
+    elif method == "emq":
+        properties.update(
+            {
+                "exact_train_prev": {"type": "boolean", "default": True},
+                "calib": {
+                    "title": "Posterior calibration",
+                    "type": "string",
+                    "enum": ["none", "nbvs", "bcts", "ts", "vs"],
+                    "default": "none",
+                },
+                "on_calib_error": {
+                    "title": "Calibration failure",
+                    "type": "string",
+                    "enum": ["raise", "backup"],
+                    "default": "raise",
+                    "x-show-when": {"calib": ["nbvs", "bcts", "ts", "vs"]},
+                },
+            }
+        )
+    elif method == "dmy":
+        properties.update(
+            {
+                "nbins": {"type": "integer", "minimum": 2, "default": 8},
+                "divergence": {
+                    "type": "string",
+                    "enum": ["HD", "topsoe"],
+                    "default": "HD",
+                },
+                "cdf": {"type": "boolean", "default": False},
+                "search": {
+                    "type": "string",
+                    "enum": ["optim_minimize", "linear_search", "ternary_search"],
+                    "default": "optim_minimize",
+                },
+            }
+        )
+    return {"type": "object", "properties": properties, "additionalProperties": False}
+
+
+def _classifier_algorithm_schema(kind: str) -> dict[str, Any]:
+    if kind == "logistic_regression":
+        properties = {
+            "max_iter": {"type": "integer", "minimum": 1, "default": 1000},
+            "c": {"type": "number", "exclusiveMinimum": 0, "default": 1.0},
+            "seed": {"type": "integer"},
+        }
+    else:
+        properties = {
+            "n_estimators": {"type": "integer", "minimum": 1, "default": 200},
+            "max_depth": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "default": None,
+            },
+            "seed": {"type": "integer"},
+        }
+    return {"type": "object", "properties": properties, "additionalProperties": False}
+
+
 def default_registry() -> NodeRegistry:
     labelled = "labelled_collection"
     return NodeRegistry(
@@ -114,36 +229,20 @@ def default_registry() -> NodeRegistry:
                     "additionalProperties": False,
                 },
             ),
-            NodeDefinition(
-                "classifier",
-                1,
-                "Classifier",
-                "model",
-                outputs=(PortDefinition("classifier", "classifier_spec"),),
-                config_schema={
-                    "type": "object",
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "enum": ["logistic_regression", "random_forest"],
-                            "default": "logistic_regression",
-                        },
-                        "max_iter": {"type": "integer", "minimum": 1, "default": 1000},
-                        "c": {"type": "number", "exclusiveMinimum": 0, "default": 1.0},
-                        "n_estimators": {"type": "integer", "minimum": 1, "default": 200},
-                        "max_depth": {
-                            "type": ["integer", "null"],
-                            "minimum": 1,
-                            "default": None,
-                        },
-                        "seed": {"type": "integer"},
-                    },
-                    "additionalProperties": False,
-                },
-                capabilities={
-                    "allowlist": ["logistic_regression", "random_forest"],
-                    "predict_proba": True,
-                },
+            *(
+                NodeDefinition(
+                    kind,
+                    1,
+                    title,
+                    "classifier",
+                    outputs=(PortDefinition("classifier", "classifier_spec"),),
+                    config_schema=_classifier_algorithm_schema(kind),
+                    capabilities={"algorithm": kind, "predict_proba": True},
+                )
+                for kind, title in (
+                    ("logistic_regression", "Logistic regression"),
+                    ("random_forest", "Random forest"),
+                )
             ),
             NodeDefinition(
                 "preprocessing",
@@ -178,43 +277,6 @@ def default_registry() -> NodeRegistry:
                 capabilities={"representation": "dense_tabular", "fit_scope": "train_only"},
             ),
             NodeDefinition(
-                "acc",
-                1,
-                "ACC",
-                "quantifier",
-                inputs=(
-                    PortDefinition("train", labelled),
-                    PortDefinition("classifier", "classifier_spec"),
-                ),
-                outputs=(PortDefinition("quantifier", "fitted_quantifier"),),
-                capabilities={"class_cardinality": "binary_or_multiclass"},
-            ),
-            *(
-                NodeDefinition(
-                    method,
-                    1,
-                    title,
-                    "quantifier",
-                    inputs=(
-                        PortDefinition("train", labelled),
-                        PortDefinition("classifier", "classifier_spec"),
-                    ),
-                    outputs=(PortDefinition("quantifier", "fitted_quantifier"),),
-                    capabilities={
-                        "class_cardinality": cardinality,
-                        "requires_probabilistic_classifier": probabilistic,
-                        "optional_dependency": None,
-                    },
-                )
-                for method, title, cardinality, probabilistic in (
-                    ("pcc", "PCC", "binary_or_multiclass", True),
-                    ("pacc", "PACC", "binary_or_multiclass", True),
-                    ("emq", "EMQ", "binary_or_multiclass", True),
-                    ("hdy", "HDy", "binary", True),
-                    ("dmy", "DMy", "binary_or_multiclass", True),
-                )
-            ),
-            NodeDefinition(
                 "evaluation",
                 1,
                 "Evaluation",
@@ -235,9 +297,34 @@ def default_registry() -> NodeRegistry:
                 config_schema={
                     "type": "object",
                     "properties": {
-                        "sample_size": {"type": "integer", "minimum": 1, "default": 100},
+                        "sample_size": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "default": None,
+                            "description": "Empty uses the entire collection size.",
+                        },
                         "n_prevalences": {"type": "integer", "minimum": 2, "default": 21},
-                        "repeats": {"type": "integer", "minimum": 1, "default": 1},
+                        "repeats": {"type": "integer", "minimum": 1, "default": 10},
+                        "smooth_limits_epsilon": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 0.49,
+                            "default": 0,
+                        },
+                        "sanity_check": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 10000,
+                        },
+                        "return_type": {
+                            "type": "string",
+                            "enum": ["sample_prev"],
+                            "default": "sample_prev",
+                            "readOnly": True,
+                            "description": (
+                                "Fixed to the paired sample representation used by evaluation."
+                            ),
+                        },
                         "seed": {"type": "integer"},
                     },
                     "additionalProperties": False,
@@ -253,8 +340,22 @@ def default_registry() -> NodeRegistry:
                 config_schema={
                     "type": "object",
                     "properties": {
-                        "sample_size": {"type": "integer", "minimum": 1, "default": 100},
+                        "sample_size": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "default": None,
+                            "description": "Empty uses the entire collection size.",
+                        },
                         "repeats": {"type": "integer", "minimum": 1, "default": 100},
+                        "return_type": {
+                            "type": "string",
+                            "enum": ["sample_prev"],
+                            "default": "sample_prev",
+                            "readOnly": True,
+                            "description": (
+                                "Fixed to the paired sample representation used by evaluation."
+                            ),
+                        },
                         "seed": {"type": "integer"},
                     },
                     "additionalProperties": False,
@@ -302,7 +403,7 @@ def default_registry() -> NodeRegistry:
                 "optimization",
                 inputs=(
                     PortDefinition("train", labelled),
-                    PortDefinition("classifier", "classifier_spec"),
+                    PortDefinition("quantifier", "quantifier_spec"),
                     PortDefinition("validation_protocol", "protocol"),
                 ),
                 outputs=(
@@ -312,11 +413,6 @@ def default_registry() -> NodeRegistry:
                 config_schema={
                     "type": "object",
                     "properties": {
-                        "method": {
-                            "type": "string",
-                            "enum": ["acc", "pacc"],
-                            "default": "acc",
-                        },
                         "classifier_values": {
                             "type": "array",
                             "items": {"type": "number"},
@@ -328,6 +424,20 @@ def default_registry() -> NodeRegistry:
                             "default": "mae",
                         },
                         "refit": {"type": "boolean", "default": True},
+                        "timeout": {
+                            "type": "integer",
+                            "minimum": -1,
+                            "default": -1,
+                            "description": "Seconds per candidate; -1 disables the timeout.",
+                        },
+                        "raise_errors": {"type": "boolean", "default": False},
+                        "verbose": {"type": "boolean", "default": False},
+                        "n_jobs": {
+                            "type": "integer",
+                            "default": 1,
+                            "readOnly": True,
+                            "description": "Fixed to one by the local resource policy.",
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -336,6 +446,41 @@ def default_registry() -> NodeRegistry:
                     "n_jobs": 1,
                     "validation_role": "required",
                 },
+            ),
+            *(
+                NodeDefinition(
+                    method,
+                    1,
+                    title,
+                    "quantifier",
+                    inputs=(PortDefinition("classifier", "classifier_spec"),),
+                    outputs=(PortDefinition("quantifier", "quantifier_spec"),),
+                    config_schema=_quantifier_schema(method),
+                    capabilities={
+                        "unfitted": True,
+                        "class_cardinality": cardinality,
+                        "requires_probabilistic_classifier": probabilistic,
+                    },
+                )
+                for method, title, cardinality, probabilistic in (
+                    ("acc", "ACC", "binary_or_multiclass", False),
+                    ("pcc", "PCC", "binary_or_multiclass", True),
+                    ("pacc", "PACC", "binary_or_multiclass", True),
+                    ("emq", "EMQ", "binary_or_multiclass", True),
+                    ("hdy", "HDy", "binary", True),
+                    ("dmy", "DMy", "binary_or_multiclass", True),
+                )
+            ),
+            NodeDefinition(
+                "fit_quantifier",
+                1,
+                "Fit quantifier",
+                "quantifier",
+                inputs=(
+                    PortDefinition("train", labelled),
+                    PortDefinition("quantifier", "quantifier_spec"),
+                ),
+                outputs=(PortDefinition("quantifier", "fitted_quantifier"),),
             ),
         )
     )

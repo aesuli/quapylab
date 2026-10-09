@@ -11,7 +11,7 @@ Phase 1 foundation work is underway. See [GOAL.md](GOAL.md) and [IMPLEMENTATION_
 - Python 3.11–3.13 (3.11 is the primary target)
 - Node.js 20 or newer
 - Windows is the first development and native packaging target
-- Linux is a required supported release platform and is tested separately
+- Standalone desktop releases are built natively for Windows, Linux, and macOS
 
 Create and activate a Python 3.11 virtual environment, then install the project:
 
@@ -68,5 +68,10 @@ Build the Windows one-file architecture spike after building the frontend:
 dist\QuaPyLab.exe --smoke-test
 ```
 
-PyInstaller artifacts must be built on their target operating system. The same maintained spec is intended to produce `dist/QuaPyLab.exe` on Windows and `dist/QuaPyLab` on Linux; Linux packaging will be validated in native CI rather than cross-compiled from Windows.
+PyInstaller artifacts must be built on their target operating system. The maintained spec produces `dist/QuaPyLab.exe` on Windows and `dist/QuaPyLab` on Linux and macOS; release builds are validated in native CI rather than cross-compiled.
 
+## Desktop releases
+
+Each push to `main` creates a GitHub release with one platform-native archive for
+Windows, Linux, and macOS. Each archive contains the single-file QuaPy Lab
+executable, this README, and the AGPL-3.0-only license.

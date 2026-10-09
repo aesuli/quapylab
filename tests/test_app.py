@@ -99,22 +99,43 @@ def test_node_types_are_published_by_the_server() -> None:
     assert [item["type"] for item in body["items"]] == [
         "acc",
         "app",
-        "classifier",
         "comparison",
         "dataset",
         "dmy",
         "emq",
         "evaluation",
+        "fit_quantifier",
         "hdy",
+        "logistic_regression",
         "model_selection",
         "npp",
         "pacc",
         "pcc",
         "preprocessing",
         "protocol_evaluation",
+        "random_forest",
         "report",
         "split",
     ]
+
+    definitions = {item["type"]: item for item in body["items"]}
+    assert definitions["app"]["config_schema"]["properties"]["repeats"]["default"] == 10
+    assert definitions["npp"]["config_schema"]["properties"]["repeats"]["default"] == 100
+    assert definitions["acc"]["config_schema"]["properties"]["solver"]["default"] == ("minimize")
+    emq = definitions["emq"]["config_schema"]["properties"]
+    assert emq["calib"]["enum"] == ["none", "nbvs", "bcts", "ts", "vs"]
+    assert emq["on_calib_error"]["x-show-when"] == {"calib": ["nbvs", "bcts", "ts", "vs"]}
+    dmy = definitions["dmy"]["config_schema"]["properties"]
+    assert dmy["nbins"]["default"] == 8
+    assert dmy["search"]["default"] == "optim_minimize"
+    assert definitions["logistic_regression"]["outputs"][0]["data_type"] == "classifier_spec"
+    assert "c" in definitions["logistic_regression"]["config_schema"]["properties"]
+    assert "n_estimators" in definitions["random_forest"]["config_schema"]["properties"]
+    assert definitions["acc"]["inputs"][0]["data_type"] == "classifier_spec"
+    assert definitions["acc"]["outputs"][0]["data_type"] == "quantifier_spec"
+    assert definitions["fit_quantifier"]["inputs"][1]["data_type"] == "quantifier_spec"
+    assert definitions["fit_quantifier"]["outputs"][0]["data_type"] == "fitted_quantifier"
+    assert definitions["model_selection"]["inputs"][1]["data_type"] == "quantifier_spec"
 
 
 def test_web_mode_is_explicit() -> None:

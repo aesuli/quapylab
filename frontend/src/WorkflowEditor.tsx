@@ -1,141 +1,1168 @@
-import { useCallback, useEffect, useState } from 'react'
-import { addEdge, Background, Connection, Controls, Edge, Handle, Node, NodeProps, Position, ReactFlow, useEdgesState, useNodesState } from '@xyflow/react'
+import { useCallback, useEffect, useState } from "react";
+import { addEdge, Background, Connection, Controls, Edge, Handle, Node, NodeProps, Position, ReactFlow, useEdgesState, useNodesState } from "@xyflow/react";
 
-type Session = { csrf_token: string | null }
-type Property = { type?: string | string[]; default?: unknown; minimum?: number; maximum?: number; enum?: string[]; items?: { type?: string } }
-type Port = { name: string; data_type: string; required: boolean }
-type Definition = { type: string; version: number; title: string; inputs: Port[]; outputs: Port[]; config_schema: { required?: string[]; properties?: Record<string, Property> } }
-type Workflow = { id: string; name: string; draft_revision_id: string }
-type Dataset = { id: string; name: string; current_version_id: string | null }
-type DatasetVersion = { id: string; schema: { columns: { name: string; type: string }[] }; row_count: number }
-type RunStatus = 'queued' | 'preparing' | 'running' | 'cancelling' | 'cancelled' | 'succeeded' | 'failed' | 'interrupted'
-type Run = { id: string; status: RunStatus; workflow_revision_id: string; seed: number; error_summary: string | null; requested_at: string; cancelled_at: string | null }
-type NodeRun = { id: string; node_id: string; node_type: string; state: string; logs: { timestamp: string; level: string; event: string; message: string }[]; error: { message?: string } | null; output_artifact_ids: string[] }
-type Revision = { id: string; workflow_id: string; graph: Graph }
-type Data = { label: string; nodeType: string; version: number; config: Record<string, unknown>; inputs: Port[]; outputs: Port[]; runState?: string }
-type Graph = { schema_version: number; nodes: { id: string; type: string; version: number; config: Record<string, unknown>; position?: { x: number; y: number } | null }[]; edges: { id: string; source: string; source_port: string; target: string; target_port: string }[] }
-type Source = { id: string; label: string; datasets: string[]; options: Record<string, string> }
-type EditorSnapshot = { nodes: Node<Data>[]; edges: Edge[] }
-type NativeDownloadApi = { download_artifact: (artifactId: string, csv: boolean) => Promise<{ saved: boolean; cancelled?: boolean; error?: string }> }
-type Comparison = { protocol: string; paired_sample_ids: string[]; metric_names: string[]; methods: { method_id: string; quantifier: string; metrics: Record<string, number> }[]; rankings: Record<string, { rank: number; method_id: string; value: number }[]> }
+type Session = { csrf_token: string | null };
+type Property = {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  readOnly?: boolean;
+  default?: unknown;
+  minimum?: number;
+  maximum?: number;
+  enum?: string[];
+  items?: { type?: string };
+  "x-show-when"?: Record<string, unknown[]>;
+  "x-default-by"?: { field: string; values: Record<string, unknown> };
+};
+type Port = { name: string; data_type: string; required: boolean };
+type Definition = {
+  type: string;
+  version: number;
+  title: string;
+  category: string;
+  inputs: Port[];
+  outputs: Port[];
+  config_schema: { required?: string[]; properties?: Record<string, Property> };
+};
+type Workflow = { id: string; name: string; draft_revision_id: string };
+type Dataset = { id: string; name: string; current_version_id: string | null };
+type DatasetVersion = {
+  id: string;
+  schema: { columns: { name: string; type: string }[] };
+  row_count: number;
+};
+type RunStatus = "queued" | "preparing" | "running" | "cancelling" | "cancelled" | "succeeded" | "failed" | "interrupted";
+type Run = {
+  id: string;
+  status: RunStatus;
+  workflow_revision_id: string;
+  seed: number;
+  error_summary: string | null;
+  requested_at: string;
+  cancelled_at: string | null;
+};
+type NodeRun = {
+  id: string;
+  node_id: string;
+  node_type: string;
+  state: string;
+  logs: { timestamp: string; level: string; event: string; message: string }[];
+  error: { message?: string } | null;
+  output_artifact_ids: string[];
+};
+type Revision = { id: string; workflow_id: string; graph: Graph };
+type Data = {
+  label: string;
+  nodeType: string;
+  version: number;
+  config: Record<string, unknown>;
+  inputs: Port[];
+  outputs: Port[];
+  runState?: string;
+};
+type Graph = {
+  schema_version: number;
+  nodes: {
+    id: string;
+    type: string;
+    version: number;
+    config: Record<string, unknown>;
+    position?: { x: number; y: number } | null;
+  }[];
+  edges: {
+    id: string;
+    source: string;
+    source_port: string;
+    target: string;
+    target_port: string;
+  }[];
+};
+type Source = {
+  id: string;
+  label: string;
+  datasets: string[];
+  options: Record<string, string>;
+};
+type EditorSnapshot = { nodes: Node<Data>[]; edges: Edge[] };
+type NativeDownloadApi = {
+  download_artifact: (artifactId: string, csv: boolean) => Promise<{ saved: boolean; cancelled?: boolean; error?: string }>;
+};
+type Comparison = {
+  protocol: string;
+  paired_sample_ids: string[];
+  metric_names: string[];
+  methods: {
+    method_id: string;
+    quantifier: string;
+    metrics: Record<string, number>;
+  }[];
+  rankings: Record<string, { rank: number; method_id: string; value: number }[]>;
+};
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { credentials: 'same-origin', ...init })
-  if (!response.ok) { const body = await response.json().catch(() => ({})) as { error?: { message?: string } }; throw new Error(body.error?.message || 'Request failed.') }
-  if (response.status === 204) return undefined as T
-  return response.json() as Promise<T>
+  const response = await fetch(path, { credentials: "same-origin", ...init });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    throw new Error(body.error?.message || "Request failed.");
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
 }
-const headers = (session: Session) => ({ 'Content-Type': 'application/json', ...(session.csrf_token ? { 'X-CSRF-Token': session.csrf_token } : {}) })
-const value = (item: unknown) => item === undefined || item === null ? '' : String(item)
-const portClass = (type: string) => `port-${type.replaceAll('_', '-')}`
-const numericProperty = (property: Property) => property.type === 'integer' || property.type === 'number' || (Array.isArray(property.type) && (property.type.includes('integer') || property.type.includes('number')))
+const headers = (session: Session) => ({
+  "Content-Type": "application/json",
+  ...(session.csrf_token ? { "X-CSRF-Token": session.csrf_token } : {}),
+});
+const value = (item: unknown) => (item === undefined || item === null ? "" : String(item));
+const portClass = (type: string) => `port-${type.replaceAll("_", "-")}`;
+const numericProperty = (property: Property) => property.type === "integer" || property.type === "number" || (Array.isArray(property.type) && (property.type.includes("integer") || property.type.includes("number")));
 const visibleProperty = (definition: Definition, name: string, config: Record<string, unknown>) => {
-  if (definition.type !== 'classifier') return true
-  const kind = config.kind || 'logistic_regression'
-  if (name === 'max_iter' || name === 'c') return kind === 'logistic_regression'
-  if (name === 'n_estimators' || name === 'max_depth') return kind === 'random_forest'
-  return true
-}
+  const condition = definition.config_schema.properties?.[name]?.["x-show-when"];
+  if (condition && !Object.entries(condition).every(([field, choices]) => choices.includes(config[field]))) return false;
+  return true;
+};
+const propertyValue = (property: Property, config: Record<string, unknown>, name: string) => {
+  if (Object.prototype.hasOwnProperty.call(config, name)) return config[name];
+  const dynamic = property["x-default-by"];
+  if (dynamic) return dynamic.values[String(config[dynamic.field] ?? "acc")];
+  return property.default;
+};
 
 function GenericPropertyInput({ property, current, editable, required, change }: { property: Property; current: unknown; editable: boolean; required: boolean; change: (value: unknown) => void }) {
-  if (property.type === 'boolean') return <input disabled={!editable} type="checkbox" checked={current === true} onChange={event => change(event.target.checked)} />
-  if (property.type === 'array') return <input disabled={!editable} type="text" placeholder="Comma-separated values" value={Array.isArray(current) ? current.join(', ') : ''} onChange={event => { const parts = event.target.value.split(',').map(item => item.trim()).filter(Boolean); change(property.items?.type === 'number' || property.items?.type === 'integer' ? parts.map(Number) : parts) }} />
-  return <input disabled={!editable} type={numericProperty(property) ? 'number' : 'text'} min={property.minimum} max={property.maximum} required={required} value={value(current)} onChange={event => change(numericProperty(property) ? (event.target.value === '' ? undefined : Number(event.target.value)) : event.target.value)} />
+  const disabled = !editable || property.readOnly === true;
+  if (property.type === "boolean") return <input disabled={disabled} type="checkbox" checked={current === true} onChange={(event) => change(event.target.checked)} />;
+  if (property.type === "array")
+    return (
+      <input
+        disabled={disabled}
+        type="text"
+        placeholder="Comma-separated values"
+        value={Array.isArray(current) ? current.join(", ") : ""}
+        onChange={(event) => {
+          const parts = event.target.value
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean);
+          change(property.items?.type === "number" || property.items?.type === "integer" ? parts.map(Number) : parts);
+        }}
+      />
+    );
+  return <input disabled={disabled} type={numericProperty(property) ? "number" : "text"} min={property.minimum} max={property.maximum} required={required} value={value(current)} onChange={(event) => change(numericProperty(property) ? (event.target.value === "" ? undefined : Number(event.target.value)) : event.target.value)} />;
 }
 
 function LabNode({ data }: NodeProps<Node<Data>>) {
-  return <div className={`lab-node${data.runState ? ` lab-node--${data.runState}` : ''}`}><div className="lab-node__heading"><span className="lab-node__kind">{data.nodeType}</span>{data.runState && <span className={`node-state node-state--${data.runState}`}>{data.runState}</span>}</div><strong>{data.label}</strong><div className="lab-node__ports">{data.inputs.map(port => <div className="lab-node__port lab-node__port--input" key={port.name}><Handle type="target" position={Position.Left} id={port.name} className={`port ${portClass(port.data_type)}`} style={{ top: '50%', left: 10 }} /><span>{port.name}<b>{port.data_type}</b></span></div>)}{data.outputs.map(port => <div className="lab-node__port lab-node__port--output" key={port.name}><span>{port.name}<b>{port.data_type}</b></span><Handle type="source" position={Position.Right} id={port.name} className={`port ${portClass(port.data_type)}`} style={{ top: '50%', right: 10 }} /></div>)}</div></div>
+  return (
+    <div className={`lab-node${data.runState ? ` lab-node--${data.runState}` : ""}`}>
+      <div className="lab-node__heading">
+        <span className="lab-node__kind">{data.nodeType}</span>
+        {data.runState && <span className={`node-state node-state--${data.runState}`}>{data.runState}</span>}
+      </div>
+      <strong>{data.label}</strong>
+      <div className="lab-node__ports">
+        {data.inputs.map((port) => (
+          <div className="lab-node__port lab-node__port--input" key={port.name}>
+            <Handle type="target" position={Position.Left} id={port.name} className={`port ${portClass(port.data_type)}`} style={{ top: "50%", left: 10 }} />
+            <span>
+              {port.name}
+              <b>{port.data_type}</b>
+            </span>
+          </div>
+        ))}
+        {data.outputs.map((port) => (
+          <div className="lab-node__port lab-node__port--output" key={port.name}>
+            <span>
+              {port.name}
+              <b>{port.data_type}</b>
+            </span>
+            <Handle type="source" position={Position.Right} id={port.name} className={`port ${portClass(port.data_type)}`} style={{ top: "50%", right: 10 }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
-const nodeTypes = { lab: LabNode }
+const nodeTypes = { lab: LabNode };
 
 function Inspector({ node, definition, version, datasets, editable, change, remove }: { node: Node<Data>; definition: Definition; version: DatasetVersion | null; datasets: Dataset[]; editable: boolean; change: (key: string, value: unknown) => void; remove: () => void }) {
-  const config = node.data.config; const representation = value(config.representation || 'tabular'); const columns = version?.schema.columns || []
-  return <aside className="node-inspector" aria-label="Node configuration"><p className="eyebrow">Node settings</p><h2>{definition.title}</h2>{Object.entries(definition.config_schema.properties || {}).length ? <div className="inspector-fields">{Object.entries(definition.config_schema.properties || {}).filter(([name]) => visibleProperty(definition, name, config)).map(([name, property]) => <label key={name}>{name}{definition.type === 'dataset' && name === 'dataset_version_id' ? <select disabled={!editable} value={value(config[name])} onChange={e => change(name, e.target.value)}><option value="">Select a dataset</option>{datasets.filter(item => item.current_version_id).map(item => <option key={item.id} value={item.current_version_id || ''}>{item.name}</option>)}</select> : definition.type === 'dataset' && name === 'representation' ? <select disabled={!editable} value={representation} onChange={e => change(name, e.target.value)}>{property.enum?.map(item => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}</select> : definition.type === 'dataset' && name === 'label_column' ? <select disabled={!editable || !version || representation === 'precomputed_matrix'} value={value(config[name])} onChange={e => change(name, e.target.value)}><option value="">Select a target column</option>{columns.map(column => <option key={column.name} value={column.name}>{column.name} ({column.type})</option>)}</select> : definition.type === 'dataset' && name === 'feature_columns' ? <select multiple disabled={!editable || !version || representation !== 'tabular'} value={Array.isArray(config[name]) ? config[name].map(String) : []} onChange={e => change(name, Array.from(e.target.selectedOptions, option => option.value))}>{columns.filter(column => column.name !== config.label_column).map(column => <option key={column.name} value={column.name}>{column.name} ({column.type})</option>)}</select> : definition.type === 'dataset' && name === 'text_column' ? <select disabled={!editable || !version || representation !== 'text'} value={value(config[name])} onChange={e => change(name, e.target.value)}><option value="">Select a text column</option>{columns.filter(column => column.name !== config.label_column).map(column => <option key={column.name} value={column.name}>{column.name} ({column.type})</option>)}</select> : property.enum ? <select disabled={!editable} value={value(config[name] ?? property.default)} onChange={e => change(name, e.target.value)}>{property.enum.map(item => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}</select> : <GenericPropertyInput property={property} current={config[name] ?? property.default} editable={editable} required={definition.config_schema.required?.includes(name) === true} change={next => change(name, next)} />}</label>)}</div> : <p className="muted">This node has no configurable settings.</p>}{editable && <button className="danger inspector-delete" onClick={remove}>Delete node and connectors</button>}</aside>
+  const config = node.data.config;
+  const representation = value(config.representation || "tabular");
+  const columns = version?.schema.columns || [];
+  return (
+    <aside className="node-inspector" aria-label="Node configuration">
+      <p className="eyebrow">Node settings</p>
+      <h2>{definition.title}</h2>
+      {Object.entries(definition.config_schema.properties || {}).length ? (
+        <div className="inspector-fields">
+          {Object.entries(definition.config_schema.properties || {})
+            .filter(([name]) => visibleProperty(definition, name, config))
+            .map(([name, property]) => (
+              <label key={name}>
+                {property.title || name}
+                {property.description && <small className="field-description">{property.description}</small>}
+                {definition.type === "dataset" && name === "dataset_version_id" ? (
+                  <select disabled={!editable} value={value(config[name])} onChange={(e) => change(name, e.target.value)}>
+                    <option value="">Select a dataset</option>
+                    {datasets
+                      .filter((item) => item.current_version_id)
+                      .map((item) => (
+                        <option key={item.id} value={item.current_version_id || ""}>
+                          {item.name}
+                        </option>
+                      ))}
+                  </select>
+                ) : definition.type === "dataset" && name === "representation" ? (
+                  <select disabled={!editable} value={representation} onChange={(e) => change(name, e.target.value)}>
+                    {property.enum?.map((item) => (
+                      <option key={item} value={item}>
+                        {item.replaceAll("_", " ")}
+                      </option>
+                    ))}
+                  </select>
+                ) : definition.type === "dataset" && name === "label_column" ? (
+                  <select disabled={!editable || !version || representation === "precomputed_matrix"} value={value(config[name])} onChange={(e) => change(name, e.target.value)}>
+                    <option value="">Select a target column</option>
+                    {columns.map((column) => (
+                      <option key={column.name} value={column.name}>
+                        {column.name} ({column.type})
+                      </option>
+                    ))}
+                  </select>
+                ) : definition.type === "dataset" && name === "feature_columns" ? (
+                  <select
+                    multiple
+                    disabled={!editable || !version || representation !== "tabular"}
+                    value={Array.isArray(config[name]) ? config[name].map(String) : []}
+                    onChange={(e) =>
+                      change(
+                        name,
+                        Array.from(e.target.selectedOptions, (option) => option.value),
+                      )
+                    }
+                  >
+                    {columns
+                      .filter((column) => column.name !== config.label_column)
+                      .map((column) => (
+                        <option key={column.name} value={column.name}>
+                          {column.name} ({column.type})
+                        </option>
+                      ))}
+                  </select>
+                ) : definition.type === "dataset" && name === "text_column" ? (
+                  <select disabled={!editable || !version || representation !== "text"} value={value(config[name])} onChange={(e) => change(name, e.target.value)}>
+                    <option value="">Select a text column</option>
+                    {columns
+                      .filter((column) => column.name !== config.label_column)
+                      .map((column) => (
+                        <option key={column.name} value={column.name}>
+                          {column.name} ({column.type})
+                        </option>
+                      ))}
+                  </select>
+                ) : property.enum ? (
+                  <select disabled={!editable || property.readOnly === true} value={value(propertyValue(property, config, name))} onChange={(e) => change(name, e.target.value)}>
+                    {property.enum.map((item) => (
+                      <option key={item} value={item}>
+                        {item.replaceAll("_", " ")}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <GenericPropertyInput property={property} current={propertyValue(property, config, name)} editable={editable} required={definition.config_schema.required?.includes(name) === true} change={(next) => change(name, next)} />
+                )}
+              </label>
+            ))}
+        </div>
+      ) : (
+        <p className="muted">This node has no configurable settings.</p>
+      )}
+      {editable && (
+        <button className="danger inspector-delete" onClick={remove}>
+          Delete node and connectors
+        </button>
+      )}
+    </aside>
+  );
 }
 
 function ComparisonPanel({ comparison, close }: { comparison: Comparison; close: () => void }) {
-  const primary = comparison.rankings.mae || []
-  const methods = [...comparison.methods].sort((left, right) => (primary.find(item => item.method_id === left.method_id)?.rank ?? Infinity) - (primary.find(item => item.method_id === right.method_id)?.rank ?? Infinity))
-  return <section className="run-panel comparison-panel" aria-label="Method comparison"><div className="run-panel__heading"><div><p className="eyebrow">Method comparison</p><strong>{comparison.protocol.toUpperCase()} · {comparison.paired_sample_ids.length} paired samples</strong></div><button className="panel-close" aria-label="Close method comparison" onClick={close}>×</button></div><div className="comparison-table-wrap"><table><thead><tr><th>MAE rank</th><th>Node</th><th>Method</th>{comparison.metric_names.map(metric => <th key={metric}>{metric.toUpperCase()}</th>)}</tr></thead><tbody>{methods.map(method => <tr key={method.method_id}><td>{primary.find(item => item.method_id === method.method_id)?.rank ?? '—'}</td><td>{method.method_id}</td><td>{method.quantifier.toUpperCase()}</td>{comparison.metric_names.map(metric => <td key={metric}>{method.metrics[metric]?.toPrecision(6) ?? '—'}</td>)}</tr>)}</tbody></table></div></section>
+  const primary = comparison.rankings.mae || [];
+  const methods = [...comparison.methods].sort((left, right) => (primary.find((item) => item.method_id === left.method_id)?.rank ?? Infinity) - (primary.find((item) => item.method_id === right.method_id)?.rank ?? Infinity));
+  return (
+    <section className="run-panel comparison-panel" aria-label="Method comparison">
+      <div className="run-panel__heading">
+        <div>
+          <p className="eyebrow">Method comparison</p>
+          <strong>
+            {comparison.protocol.toUpperCase()} · {comparison.paired_sample_ids.length} paired samples
+          </strong>
+        </div>
+        <button className="panel-close" aria-label="Close method comparison" onClick={close}>
+          ×
+        </button>
+      </div>
+      <div className="comparison-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>MAE rank</th>
+              <th>Node</th>
+              <th>Method</th>
+              {comparison.metric_names.map((metric) => (
+                <th key={metric}>{metric.toUpperCase()}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {methods.map((method) => (
+              <tr key={method.method_id}>
+                <td>{primary.find((item) => item.method_id === method.method_id)?.rank ?? "—"}</td>
+                <td>{method.method_id}</td>
+                <td>{method.quantifier.toUpperCase()}</td>
+                {comparison.metric_names.map((metric) => (
+                  <td key={metric}>{method.metrics[metric]?.toPrecision(6) ?? "—"}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
 }
 
 function RunPanel({ run, history, nodes, editable, choose, cancel, download, viewComparison, close }: { run: Run; history: Run[]; nodes: NodeRun[]; editable: boolean; choose: (run: Run) => void; cancel: () => void; download: (artifactId: string, csv: boolean) => void; viewComparison: (artifactId: string) => void; close: () => void }) {
-  const active = ['queued', 'preparing', 'running', 'cancelling'].includes(run.status)
-  return <section className="run-panel" aria-live="polite"><div className="run-panel__heading"><div><p className="eyebrow">Run history</p><select aria-label="Selected run" value={run.id} onChange={event => { const selected = history.find(item => item.id === event.target.value); if (selected) choose(selected) }}>{history.map(item => <option key={item.id} value={item.id}>{new Date(item.requested_at).toLocaleString()} · {item.status} · seed {item.seed}</option>)}</select><span className={`node-state node-state--${run.status}`}>{run.status}</span></div>{active && editable && <button className="danger" disabled={run.status === 'cancelling'} onClick={cancel}>{run.status === 'cancelling' ? 'Cancelling…' : 'Cancel run'}</button>}<button className="panel-close" aria-label="Hide run history" onClick={close}>×</button></div>{run.error_summary && <p className="run-error">{run.error_summary}</p>}<div className="run-nodes">{nodes.map(node => { const lastLog = node.logs.at(-1); const evaluation = node.node_type === 'evaluation' || node.node_type === 'protocol_evaluation'; return <article key={node.id} className="run-node"><div><strong>{node.node_id}</strong><span className={`node-state node-state--${node.state}`}>{node.state}</span></div>{lastLog && <p>{lastLog.message}</p>}{node.error?.message && <p className="run-error">{node.error.message}</p>}{node.output_artifact_ids.length > 0 && <div className="artifact-links">{node.output_artifact_ids.map((artifactId, index) => <span key={artifactId}>{node.node_type === 'comparison' && index === 0 && <button className="artifact-action" onClick={() => viewComparison(artifactId)}>View comparison</button>}<button className="artifact-action" onClick={() => download(artifactId, false)}>Download {node.node_type} output {index + 1}</button>{(evaluation || (node.node_type === 'comparison' && index === 0)) && <button className="artifact-action" onClick={() => download(artifactId, true)}>Export CSV</button>}</span>)}</div>}</article> })}</div></section>
+  const active = ["queued", "preparing", "running", "cancelling"].includes(run.status);
+  return (
+    <section className="run-panel" aria-live="polite">
+      <div className="run-panel__heading">
+        <div>
+          <p className="eyebrow">Run history</p>
+          <select
+            aria-label="Selected run"
+            value={run.id}
+            onChange={(event) => {
+              const selected = history.find((item) => item.id === event.target.value);
+              if (selected) choose(selected);
+            }}
+          >
+            {history.map((item) => (
+              <option key={item.id} value={item.id}>
+                {new Date(item.requested_at).toLocaleString()} · {item.status} · seed {item.seed}
+              </option>
+            ))}
+          </select>
+          <span className={`node-state node-state--${run.status}`}>{run.status}</span>
+        </div>
+        {active && editable && (
+          <button className="danger" disabled={run.status === "cancelling"} onClick={cancel}>
+            {run.status === "cancelling" ? "Cancelling…" : "Cancel run"}
+          </button>
+        )}
+        <button className="panel-close" aria-label="Hide run history" onClick={close}>
+          ×
+        </button>
+      </div>
+      {run.error_summary && <p className="run-error">{run.error_summary}</p>}
+      <div className="run-nodes">
+        {nodes.map((node) => {
+          const lastLog = node.logs.at(-1);
+          const evaluation = node.node_type === "evaluation" || node.node_type === "protocol_evaluation";
+          return (
+            <article key={node.id} className="run-node">
+              <div>
+                <strong>{node.node_id}</strong>
+                <span className={`node-state node-state--${node.state}`}>{node.state}</span>
+              </div>
+              {lastLog && <p>{lastLog.message}</p>}
+              {node.error?.message && <p className="run-error">{node.error.message}</p>}
+              {node.output_artifact_ids.length > 0 && (
+                <div className="artifact-links">
+                  {node.output_artifact_ids.map((artifactId, index) => (
+                    <span key={artifactId}>
+                      {node.node_type === "comparison" && index === 0 && (
+                        <button className="artifact-action" onClick={() => viewComparison(artifactId)}>
+                          View comparison
+                        </button>
+                      )}
+                      <button className="artifact-action" onClick={() => download(artifactId, false)}>
+                        Download {node.node_type} output {index + 1}
+                      </button>
+                      {(evaluation || (node.node_type === "comparison" && index === 0)) && (
+                        <button className="artifact-action" onClick={() => download(artifactId, true)}>
+                          Export CSV
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 export function WorkflowEditor({ projectId, editable, session }: { projectId: string; editable: boolean; session: Session }) {
-  const [definitions, setDefinitions] = useState<Definition[]>([]); const [workflows, setWorkflows] = useState<Workflow[]>([]); const [datasets, setDatasets] = useState<Dataset[]>([]); const [active, setActive] = useState<Workflow | null>(null); const [nodes, setNodes, onNodesChange] = useNodesState<Node<Data>>([]); const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]); const [selectedId, setSelectedId] = useState<string | null>(null); const [selectedVersion, setSelectedVersion] = useState<DatasetVersion | null>(null); const [preview, setPreview] = useState<DatasetVersion | null>(null); const [sources, setSources] = useState<Source[]>([]); const [sourceId, setSourceId] = useState(''); const [sourceDataset, setSourceDataset] = useState(''); const [sourceOptions, setSourceOptions] = useState<Record<string, unknown>>({}); const [importOpen, setImportOpen] = useState(false); const [error, setError] = useState<string | null>(null); const [saving, setSaving] = useState(false); const [run, setRun] = useState<Run | null>(null); const [runHistory, setRunHistory] = useState<Run[]>([]); const [nodeRuns, setNodeRuns] = useState<NodeRun[]>([]); const [seed, setSeed] = useState(0); const [running, setRunning] = useState(false); const [datasetOpen, setDatasetOpen] = useState(false); const [datasetQuery, setDatasetQuery] = useState(''); const [runOpen, setRunOpen] = useState(true); const [nodePaletteOpen, setNodePaletteOpen] = useState(false); const [nodeQuery, setNodeQuery] = useState('')
-  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null); const [undoStack, setUndoStack] = useState<EditorSnapshot[]>([]); const [redoStack, setRedoStack] = useState<EditorSnapshot[]>([])
-  const [comparison, setComparison] = useState<Comparison | null>(null)
-  const definitionFor = useCallback((node: Node<Data>) => definitions.find(item => item.type === node.data.nodeType), [definitions])
-  const refreshDatasets = useCallback(async () => { setDatasets((await api<{ items: Dataset[] }>(`/api/v1/projects/${projectId}/datasets`)).items) }, [projectId])
-  const loadRun = useCallback(async (selectedRun: Run, availableDefinitions = definitions, availableWorkflows = workflows) => { const [revision, runNodes] = await Promise.all([api<Revision>(`/api/v1/workflow-revisions/${selectedRun.workflow_revision_id}`), api<{ items: NodeRun[] }>(`/api/v1/runs/${selectedRun.id}/nodes`)]); const workflow = availableWorkflows.find(item => item.id === revision.workflow_id); if (workflow) setActive(workflow); setSelectedId(null); setRun(selectedRun); setNodeRuns(runNodes.items); setNodes(revision.graph.nodes.map((item, index) => { const definition = availableDefinitions.find(candidate => candidate.type === item.type && candidate.version === item.version); return { id: item.id, type: 'lab', position: item.position || { x: 70 + index * 240, y: 120 }, data: { label: definition?.title || item.type, nodeType: item.type, version: item.version, config: item.config, inputs: definition?.inputs || [], outputs: definition?.outputs || [], runState: runNodes.items.find(node => node.node_id === item.id)?.state } } })); setEdges(revision.graph.edges.map(edge => ({ id: edge.id, source: edge.source, target: edge.target, sourceHandle: edge.source_port, targetHandle: edge.target_port }))) }, [definitions, setEdges, setNodes, workflows])
-  const select = useCallback(async (workflow: Workflow, available = definitions) => { const revision = await api<{ graph: Graph }>(`/api/v1/workflow-revisions/${workflow.draft_revision_id}`); setActive(workflow); setSelectedId(null); setNodes(revision.graph.nodes.map((item, index) => { const definition = available.find(candidate => candidate.type === item.type && candidate.version === item.version); return { id: item.id, type: 'lab', position: item.position || { x: 70 + index * 240, y: 120 }, data: { label: definition?.title || item.type, nodeType: item.type, version: item.version, config: item.config, inputs: definition?.inputs || [], outputs: definition?.outputs || [] } } })); setEdges(revision.graph.edges.map(edge => ({ id: edge.id, source: edge.source, target: edge.target, sourceHandle: edge.source_port, targetHandle: edge.target_port }))) }, [definitions, setEdges, setNodes])
-  useEffect(() => { void Promise.all([api<{ items: Definition[] }>('/api/v1/node-types'), api<{ items: Workflow[] }>(`/api/v1/projects/${projectId}/workflows`), api<{ items: Run[] }>(`/api/v1/projects/${projectId}/runs`), refreshDatasets()]).then(async ([types, list, runs]) => { setDefinitions(types.items); setWorkflows(list.items); setRunHistory(runs.items); if (runs.items[0]) await loadRun(runs.items[0], types.items, list.items); else if (list.items[0]) await select(list.items[0], types.items) }).catch(reason => setError(reason instanceof Error ? reason.message : 'Could not load workspace.')); void api<{ items: Source[] }>('/api/v1/dataset-sources/quapy').then(result => { setSources(result.items); setSourceId(result.items[0]?.id || ''); setSourceDataset(result.items[0]?.datasets[0] || '') }) }, [projectId, refreshDatasets])
-  const selected = nodes.find(node => node.id === selectedId) || null; const selectedDefinition = selected ? definitionFor(selected) : undefined; const versionId = selected?.data.nodeType === 'dataset' ? selected.data.config.dataset_version_id : undefined
-  useEffect(() => { if (typeof versionId !== 'string' || !versionId) { setSelectedVersion(null); return }; void api<DatasetVersion>(`/api/v1/dataset-versions/${versionId}`).then(setSelectedVersion).catch(reason => setError(reason instanceof Error ? reason.message : 'Could not load dataset columns.')) }, [versionId])
-  useEffect(() => { setNodes(current => current.map(node => ({ ...node, data: { ...node.data, runState: nodeRuns.find(item => item.node_id === node.id)?.state } }))) }, [nodeRuns, setNodes])
+  const [definitions, setDefinitions] = useState<Definition[]>([]);
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [active, setActive] = useState<Workflow | null>(null);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node<Data>>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedVersion, setSelectedVersion] = useState<DatasetVersion | null>(null);
+  const [preview, setPreview] = useState<DatasetVersion | null>(null);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [sourceId, setSourceId] = useState("");
+  const [sourceDataset, setSourceDataset] = useState("");
+  const [sourceOptions, setSourceOptions] = useState<Record<string, unknown>>({});
+  const [importOpen, setImportOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [run, setRun] = useState<Run | null>(null);
+  const [runHistory, setRunHistory] = useState<Run[]>([]);
+  const [nodeRuns, setNodeRuns] = useState<NodeRun[]>([]);
+  const [seed, setSeed] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [datasetOpen, setDatasetOpen] = useState(false);
+  const [datasetQuery, setDatasetQuery] = useState("");
+  const [runOpen, setRunOpen] = useState(true);
+  const [nodePaletteOpen, setNodePaletteOpen] = useState(false);
+  const [nodeQuery, setNodeQuery] = useState("");
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [undoStack, setUndoStack] = useState<EditorSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<EditorSnapshot[]>([]);
+  const [comparison, setComparison] = useState<Comparison | null>(null);
+  const definitionFor = useCallback((node: Node<Data>) => definitions.find((item) => item.type === node.data.nodeType), [definitions]);
+  const refreshDatasets = useCallback(async () => {
+    setDatasets((await api<{ items: Dataset[] }>(`/api/v1/projects/${projectId}/datasets`)).items);
+  }, [projectId]);
+  const loadRun = useCallback(
+    async (selectedRun: Run, availableDefinitions = definitions, availableWorkflows = workflows) => {
+      const [revision, runNodes] = await Promise.all([api<Revision>(`/api/v1/workflow-revisions/${selectedRun.workflow_revision_id}`), api<{ items: NodeRun[] }>(`/api/v1/runs/${selectedRun.id}/nodes`)]);
+      const workflow = availableWorkflows.find((item) => item.id === revision.workflow_id);
+      if (workflow) setActive(workflow);
+      setSelectedId(null);
+      setRun(selectedRun);
+      setNodeRuns(runNodes.items);
+      setNodes(
+        revision.graph.nodes.map((item, index) => {
+          const definition = availableDefinitions.find((candidate) => candidate.type === item.type && candidate.version === item.version);
+          return {
+            id: item.id,
+            type: "lab",
+            position: item.position || { x: 70 + index * 240, y: 120 },
+            data: {
+              label: definition?.title || item.type,
+              nodeType: item.type,
+              version: item.version,
+              config: item.config,
+              inputs: definition?.inputs || [],
+              outputs: definition?.outputs || [],
+              runState: runNodes.items.find((node) => node.node_id === item.id)?.state,
+            },
+          };
+        }),
+      );
+      setEdges(
+        revision.graph.edges.map((edge) => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.source_port,
+          targetHandle: edge.target_port,
+        })),
+      );
+    },
+    [definitions, setEdges, setNodes, workflows],
+  );
+  const select = useCallback(
+    async (workflow: Workflow, available = definitions) => {
+      const revision = await api<{ graph: Graph }>(`/api/v1/workflow-revisions/${workflow.draft_revision_id}`);
+      setActive(workflow);
+      setSelectedId(null);
+      setNodes(
+        revision.graph.nodes.map((item, index) => {
+          const definition = available.find((candidate) => candidate.type === item.type && candidate.version === item.version);
+          return {
+            id: item.id,
+            type: "lab",
+            position: item.position || { x: 70 + index * 240, y: 120 },
+            data: {
+              label: definition?.title || item.type,
+              nodeType: item.type,
+              version: item.version,
+              config: item.config,
+              inputs: definition?.inputs || [],
+              outputs: definition?.outputs || [],
+            },
+          };
+        }),
+      );
+      setEdges(
+        revision.graph.edges.map((edge) => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.source_port,
+          targetHandle: edge.target_port,
+        })),
+      );
+    },
+    [definitions, setEdges, setNodes],
+  );
   useEffect(() => {
-    if (!run || !['queued', 'preparing', 'running', 'cancelling'].includes(run.status)) return
-    let stopped = false
+    void Promise.all([api<{ items: Definition[] }>("/api/v1/node-types"), api<{ items: Workflow[] }>(`/api/v1/projects/${projectId}/workflows`), api<{ items: Run[] }>(`/api/v1/projects/${projectId}/runs`), refreshDatasets()])
+      .then(async ([types, list, runs]) => {
+        setDefinitions(types.items);
+        setWorkflows(list.items);
+        setRunHistory(runs.items);
+        if (runs.items[0]) await loadRun(runs.items[0], types.items, list.items);
+        else if (list.items[0]) await select(list.items[0], types.items);
+      })
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load workspace."));
+    void api<{ items: Source[] }>("/api/v1/dataset-sources/quapy").then((result) => {
+      setSources(result.items);
+      setSourceId(result.items[0]?.id || "");
+      setSourceDataset(result.items[0]?.datasets[0] || "");
+    });
+  }, [projectId, refreshDatasets]);
+  const selected = nodes.find((node) => node.id === selectedId) || null;
+  const selectedDefinition = selected ? definitionFor(selected) : undefined;
+  const versionId = selected?.data.nodeType === "dataset" ? selected.data.config.dataset_version_id : undefined;
+  useEffect(() => {
+    if (typeof versionId !== "string" || !versionId) {
+      setSelectedVersion(null);
+      return;
+    }
+    void api<DatasetVersion>(`/api/v1/dataset-versions/${versionId}`)
+      .then(setSelectedVersion)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load dataset columns."));
+  }, [versionId]);
+  useEffect(() => {
+    setNodes((current) =>
+      current.map((node) => ({
+        ...node,
+        data: {
+          ...node.data,
+          runState: nodeRuns.find((item) => item.node_id === node.id)?.state,
+        },
+      })),
+    );
+  }, [nodeRuns, setNodes]);
+  useEffect(() => {
+    if (!run || !["queued", "preparing", "running", "cancelling"].includes(run.status)) return;
+    let stopped = false;
     const poll = async () => {
       try {
-        const [nextRun, nextNodes] = await Promise.all([api<Run>(`/api/v1/runs/${run.id}`), api<{ items: NodeRun[] }>(`/api/v1/runs/${run.id}/nodes`)])
-        if (!stopped) { setRun(nextRun); setNodeRuns(nextNodes.items); setRunHistory(current => current.map(item => item.id === nextRun.id ? nextRun : item)) }
-      } catch (reason) { if (!stopped) setError(reason instanceof Error ? reason.message : 'Could not refresh the run.') }
-    }
-    const timer = window.setInterval(() => { void poll() }, 1000)
-    void poll()
-    return () => { stopped = true; window.clearInterval(timer) }
-  }, [run?.id, run?.status])
-  function remember() { setUndoStack(current => [...current.slice(-49), { nodes, edges }]); setRedoStack([]) }
-  function undo() { const previous = undoStack.at(-1); if (!previous) return; setRedoStack(current => [...current, { nodes, edges }]); setNodes(previous.nodes); setEdges(previous.edges); setUndoStack(current => current.slice(0, -1)); setSelectedId(null); setSelectedEdgeId(null) }
-  function redo() { const next = redoStack.at(-1); if (!next) return; setUndoStack(current => [...current, { nodes, edges }]); setNodes(next.nodes); setEdges(next.edges); setRedoStack(current => current.slice(0, -1)); setSelectedId(null); setSelectedEdgeId(null) }
-  function update(key: string, next: unknown) { if (!selectedId) return; remember(); setNodes(current => current.map(node => { if (node.id !== selectedId) return node; const config = { ...node.data.config }; if (next === '' || next === undefined) delete config[key]; else config[key] = next; if (key === 'representation' && next === 'text') delete config.feature_columns; if (key === 'representation' && next === 'tabular') delete config.text_column; if (key === 'representation' && next === 'precomputed_matrix') { delete config.feature_columns; delete config.text_column; delete config.label_column }; return { ...node, data: { ...node.data, config } } })) }
-  function add(definition: Definition) { remember(); const id = `${definition.type}-${Date.now()}`; const config = Object.fromEntries(Object.entries(definition.config_schema.properties || {}).filter(([, item]) => item.default !== undefined).map(([key, item]) => [key, item.default])); setNodes(current => [...current, { id, type: 'lab', position: { x: 80 + current.length * 45, y: 80 + current.length * 45 }, data: { label: definition.title, nodeType: definition.type, version: definition.version, config, inputs: definition.inputs, outputs: definition.outputs } }]); setSelectedId(id) }
-  function removeSelectedNode() { if (!selectedId) return; remember(); setNodes(current => current.filter(node => node.id !== selectedId)); setEdges(current => current.filter(edge => edge.source !== selectedId && edge.target !== selectedId)); setSelectedId(null) }
-  function removeSelectedEdge() { if (!selectedEdgeId) return; remember(); setEdges(current => current.filter(edge => edge.id !== selectedEdgeId)); setSelectedEdgeId(null) }
-  async function renameWorkflow() { if (!active) return; const name = window.prompt('Workflow name', active.name)?.trim(); if (!name) return; try { const updated = await api<Workflow>(`/api/v1/workflows/${active.id}`, { method: 'PATCH', headers: headers(session), body: JSON.stringify({ name }) }); setActive(updated); setWorkflows(current => current.map(item => item.id === updated.id ? updated : item)) } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not rename workflow.') } }
-  async function duplicateWorkflow() { if (!active) return; const name = window.prompt('Name for the duplicate', `${active.name} copy`)?.trim(); if (!name) return; try { const duplicate = await api<Workflow>(`/api/v1/workflows/${active.id}/duplicate`, { method: 'POST', headers: headers(session), body: JSON.stringify({ name }) }); setWorkflows(current => [...current, duplicate].sort((a, b) => a.name.localeCompare(b.name))); await select(duplicate) } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not duplicate workflow.') } }
-  async function deleteWorkflow() { if (!active || !window.confirm(`Delete workflow “${active.name}”? Its immutable revisions and run evidence will be retained.`)) return; try { await api<void>(`/api/v1/workflows/${active.id}`, { method: 'DELETE', headers: headers(session) }); const remaining = workflows.filter(item => item.id !== active.id); setWorkflows(remaining); setActive(null); setNodes([]); setEdges([]); setSelectedId(null); if (remaining[0]) await select(remaining[0]) } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not delete workflow.') } }
-  async function deleteDataset(dataset: Dataset) { if (!window.confirm(`Delete dataset “${dataset.name}”? Existing run evidence will be retained.`)) return; try { await api<void>(`/api/v1/datasets/${dataset.id}`, { method: 'DELETE', headers: headers(session) }); await refreshDatasets() } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not delete dataset.') } }
-  async function upload(file: File) { const form = new FormData(); form.set('name', file.name.replace(/\.(csv|tsv)$/i, '')); form.set('file', file); try { const response = await fetch(`/api/v1/projects/${projectId}/datasets`, { method: 'POST', credentials: 'same-origin', headers: session.csrf_token ? { 'X-CSRF-Token': session.csrf_token } : {}, body: form }); if (!response.ok) throw new Error('Upload failed.'); setPreview(await response.json()); await refreshDatasets() } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not ingest dataset.') } }
-  async function importQuaPy() { if (!sourceId || !sourceDataset) return; try { const result = await api<DatasetVersion>(`/api/v1/projects/${projectId}/datasets/quapy`, { method: 'POST', headers: headers(session), body: JSON.stringify({ source_id: sourceId, dataset_name: sourceDataset, options: sourceOptions }) }); setPreview(result); setImportOpen(false); await refreshDatasets() } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not import QuaPy dataset.') } }
-  function validConnection(connection: Connection | Edge) { const source = nodes.find(node => node.id === connection.source); const target = nodes.find(node => node.id === connection.target); if (!source || !target || !connection.sourceHandle || !connection.targetHandle || source.id === target.id) return false; const output = source.data.outputs.find(port => port.name === connection.sourceHandle); const input = target.data.inputs.find(port => port.name === connection.targetHandle); return output?.data_type === input?.data_type && !edges.some(edge => edge.target === target.id && edge.targetHandle === input?.name) }
-  function autoLayout() { remember(); setNodes(current => current.map((node, index) => ({ ...node, position: { x: 80 + (index % 3) * 300, y: 80 + Math.floor(index / 3) * 220 } }))) }
-  function graphFromEditor(): Graph { return { schema_version: 1, nodes: nodes.map(node => ({ id: node.id, type: node.data.nodeType, version: node.data.version, config: node.data.config, position: node.position })), edges: edges.map(edge => { if (!edge.sourceHandle || !edge.targetHandle) throw new Error('Every connection must join explicit named ports.'); return { id: edge.id, source: edge.source, source_port: edge.sourceHandle, target: edge.target, target_port: edge.targetHandle } }) } }
-  async function save(): Promise<Workflow | null> { setSaving(true); setError(null); try { const graph = graphFromEditor(); await api('/api/v1/workflows/validate', { method: 'POST', headers: headers(session), body: JSON.stringify(graph) }); if (active) { const revision = await api<Revision>(`/api/v1/workflows/${active.id}/revisions`, { method: 'POST', headers: headers(session), body: JSON.stringify({ graph }) }); const workflow = { ...active, draft_revision_id: revision.id }; setActive(workflow); setWorkflows(current => current.map(item => item.id === workflow.id ? workflow : item)); return workflow } const name = window.prompt('Workflow name', 'Untitled workflow'); if (!name) return null; const workflow = await api<Workflow>(`/api/v1/projects/${projectId}/workflows`, { method: 'POST', headers: headers(session), body: JSON.stringify({ name, graph }) }); setWorkflows(current => [...current, workflow]); setActive(workflow); return workflow } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not save workflow.'); return null } finally { setSaving(false) } }
-  async function startRun() { setRunning(true); setError(null); try { const workflow = await save(); if (!workflow) return; const nextRun = await api<Run>(`/api/v1/projects/${projectId}/runs`, { method: 'POST', headers: headers(session), body: JSON.stringify({ workflow_revision_id: workflow.draft_revision_id, seed }) }); setRunHistory(current => [nextRun, ...current.filter(item => item.id !== nextRun.id)]); await loadRun(nextRun, definitions, workflows) } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not start the run.') } finally { setRunning(false) } }
-  async function cancelRun() { if (!run) return; try { const cancelled = await api<Run>(`/api/v1/runs/${run.id}/cancel`, { method: 'POST', headers: headers(session) }); setRun(cancelled); setRunHistory(current => current.map(item => item.id === cancelled.id ? cancelled : item)) } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not cancel the run.') } }
-  async function viewComparison(artifactId: string) { try { setComparison(await api<Comparison>(`/api/v1/artifacts/${artifactId}/download`)) } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not open the comparison.') } }
-  async function downloadArtifact(artifactId: string, csv: boolean) {
-    try {
-      const nativeApi = (window as Window & { pywebview?: { api?: NativeDownloadApi } }).pywebview?.api
-      if (nativeApi) {
-        const result = await nativeApi.download_artifact(artifactId, csv)
-        if (result.cancelled) return
-        if (!result.saved) throw new Error(result.error || 'The artifact could not be saved.')
-        return
+        const [nextRun, nextNodes] = await Promise.all([api<Run>(`/api/v1/runs/${run.id}`), api<{ items: NodeRun[] }>(`/api/v1/runs/${run.id}/nodes`)]);
+        if (!stopped) {
+          setRun(nextRun);
+          setNodeRuns(nextNodes.items);
+          setRunHistory((current) => current.map((item) => (item.id === nextRun.id ? nextRun : item)));
+        }
+      } catch (reason) {
+        if (!stopped) setError(reason instanceof Error ? reason.message : "Could not refresh the run.");
       }
-      const suffix = csv ? '/evaluation.csv' : '/download'
-      const response = await fetch(`/api/v1/artifacts/${artifactId}${suffix}`, { credentials: 'same-origin' })
-      if (!response.ok) throw new Error('The artifact could not be downloaded.')
-      const disposition = response.headers.get('Content-Disposition') || ''
-      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `artifact-${artifactId}`
-      const url = URL.createObjectURL(await response.blob())
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = filename
-      document.body.append(anchor)
-      anchor.click()
-      anchor.remove()
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    };
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 1000);
+    void poll();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [run?.id, run?.status]);
+  function remember() {
+    setUndoStack((current) => [...current.slice(-49), { nodes, edges }]);
+    setRedoStack([]);
+  }
+  function undo() {
+    const previous = undoStack.at(-1);
+    if (!previous) return;
+    setRedoStack((current) => [...current, { nodes, edges }]);
+    setNodes(previous.nodes);
+    setEdges(previous.edges);
+    setUndoStack((current) => current.slice(0, -1));
+    setSelectedId(null);
+    setSelectedEdgeId(null);
+  }
+  function redo() {
+    const next = redoStack.at(-1);
+    if (!next) return;
+    setUndoStack((current) => [...current, { nodes, edges }]);
+    setNodes(next.nodes);
+    setEdges(next.edges);
+    setRedoStack((current) => current.slice(0, -1));
+    setSelectedId(null);
+    setSelectedEdgeId(null);
+  }
+  function update(key: string, next: unknown) {
+    if (!selectedId) return;
+    remember();
+    setNodes((current) =>
+      current.map((node) => {
+        if (node.id !== selectedId) return node;
+        const config = { ...node.data.config };
+        if (next === "" || next === undefined) delete config[key];
+        else config[key] = next;
+        if (key === "representation" && next === "text") delete config.feature_columns;
+        if (key === "representation" && next === "tabular") delete config.text_column;
+        if (key === "representation" && next === "precomputed_matrix") {
+          delete config.feature_columns;
+          delete config.text_column;
+          delete config.label_column;
+        }
+        const definition = definitionFor(node);
+        if (definition) for (const name of Object.keys(definition.config_schema.properties || {})) if (!visibleProperty(definition, name, config)) delete config[name];
+        return { ...node, data: { ...node.data, config } };
+      }),
+    );
+  }
+  function add(definition: Definition) {
+    remember();
+    const id = `${definition.type}-${Date.now()}`;
+    const properties = definition.config_schema.properties || {};
+    const defaults = Object.fromEntries(
+      Object.entries(properties)
+        .filter(([, item]) => item.default !== undefined)
+        .map(([key, item]) => [key, item.default]),
+    );
+    const config = Object.fromEntries(Object.entries(defaults).filter(([name]) => visibleProperty(definition, name, defaults)));
+    setNodes((current) => [
+      ...current,
+      {
+        id,
+        type: "lab",
+        position: { x: 80 + current.length * 45, y: 80 + current.length * 45 },
+        data: {
+          label: definition.title,
+          nodeType: definition.type,
+          version: definition.version,
+          config,
+          inputs: definition.inputs,
+          outputs: definition.outputs,
+        },
+      },
+    ]);
+    setSelectedId(id);
+  }
+  function removeSelectedNode() {
+    if (!selectedId) return;
+    remember();
+    setNodes((current) => current.filter((node) => node.id !== selectedId));
+    setEdges((current) => current.filter((edge) => edge.source !== selectedId && edge.target !== selectedId));
+    setSelectedId(null);
+  }
+  function removeSelectedEdge() {
+    if (!selectedEdgeId) return;
+    remember();
+    setEdges((current) => current.filter((edge) => edge.id !== selectedEdgeId));
+    setSelectedEdgeId(null);
+  }
+  async function renameWorkflow() {
+    if (!active) return;
+    const name = window.prompt("Workflow name", active.name)?.trim();
+    if (!name) return;
+    try {
+      const updated = await api<Workflow>(`/api/v1/workflows/${active.id}`, {
+        method: "PATCH",
+        headers: headers(session),
+        body: JSON.stringify({ name }),
+      });
+      setActive(updated);
+      setWorkflows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not download artifact.')
+      setError(reason instanceof Error ? reason.message : "Could not rename workflow.");
     }
   }
-  const source = sources.find(item => item.id === sourceId)
-  return <section className="editor-panel"><div className="editor-toolbar"><select value={active?.id || ''} onChange={e => { const item = workflows.find(workflow => workflow.id === e.target.value); if (item) void select(item) }}><option value="">New workflow</option>{workflows.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{active && editable && <><button onClick={() => void renameWorkflow()}>Rename</button><button onClick={() => void duplicateWorkflow()}>Duplicate</button><button className="danger" onClick={() => void deleteWorkflow()}>Delete workflow</button></>}<button disabled={!editable || undoStack.length === 0} onClick={undo}>Undo</button><button disabled={!editable || redoStack.length === 0} onClick={redo}>Redo</button><button disabled={!editable || nodes.length === 0} onClick={autoLayout}>Auto layout</button>{selectedEdgeId && editable && <button className="danger" onClick={removeSelectedEdge}>Delete connector</button>}<span className="toolbar-separator" aria-hidden="true" /><button className="add-node-button" disabled={!editable} onClick={() => setNodePaletteOpen(current => !current)}>+ Add node</button><label className="file-button">Import CSV/TSV<input disabled={!editable} type="file" accept=".csv,.tsv" onChange={e => { const file = e.target.files?.[0]; if (file) void upload(file) }} /></label><button disabled={!editable} onClick={() => setImportOpen(current => !current)}>Import QuaPy dataset</button><button onClick={() => setDatasetOpen(true)}>Datasets ({datasets.length})</button>{run && !runOpen && <button onClick={() => setRunOpen(true)}>Show run history</button>}<button disabled={!editable || saving || running} onClick={() => void save()}>{saving && !running ? 'Saving…' : 'Validate & save'}</button><label className="seed-field">Seed<input disabled={!editable || running} type="number" step="1" value={seed} onChange={e => setSeed(Number(e.target.value))} /></label><button className="run-button" disabled={!editable || saving || running || (run !== null && ['queued', 'preparing', 'running', 'cancelling'].includes(run.status))} onClick={() => void startRun()}>{running ? 'Starting…' : 'Save & run'}</button></div>{nodePaletteOpen && <section className="node-palette"><div className="panel-heading"><strong>Add node</strong><button className="panel-close" aria-label="Close node palette" onClick={() => setNodePaletteOpen(false)}>×</button></div><input autoFocus aria-label="Filter node types" placeholder="Filter nodes…" value={nodeQuery} onChange={event => setNodeQuery(event.target.value)} /><div className="node-palette-list">{definitions.filter(definition => `${definition.title} ${definition.type}`.toLowerCase().includes(nodeQuery.trim().toLowerCase())).map(definition => <button key={definition.type} onClick={() => { add(definition); setNodePaletteOpen(false) }}><strong>{definition.title}</strong><span>{definition.type}</span></button>)}</div></section>}{importOpen && <section className="quapy-import"><div className="quapy-import-heading"><strong>Import QuaPy dataset</strong><button className="icon-button" aria-label="Close QuaPy import" onClick={() => setImportOpen(false)}>×</button></div><select value={sourceId} onChange={e => { const item = sources.find(source => source.id === e.target.value); setSourceId(e.target.value); setSourceDataset(item?.datasets[0] || ''); setSourceOptions({}) }}>{sources.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select><select value={sourceDataset} onChange={e => setSourceDataset(e.target.value)}>{source?.datasets.map(item => <option key={item}>{item}</option>)}</select>{source && Object.entries(source.options).map(([key, kind]) => <label key={key}>{key}<input type={kind === 'boolean' ? 'checkbox' : 'number'} checked={kind === 'boolean' && sourceOptions[key] === true} value={kind === 'boolean' ? undefined : value(sourceOptions[key])} onChange={e => setSourceOptions(current => ({ ...current, [key]: kind === 'boolean' ? e.target.checked : e.target.value === '' ? undefined : Number(e.target.value) }))} /></label>)}<button onClick={() => void importQuaPy()}>Import QuaPy</button></section>}{error && <div className="form-error feedback-message" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setError(null)}>×</button></div>}{preview && <div className="dataset-preview"><div><strong>{preview.row_count} rows imported</strong><span>{preview.schema.columns.map(column => `${column.name} (${column.type})`).join(', ')}</span></div><button className="panel-close" aria-label="Dismiss dataset notification" onClick={() => setPreview(null)}>×</button></div>}{datasetOpen && <section className="dataset-manager"><div className="panel-heading"><strong>Datasets ({datasets.length})</strong><button className="panel-close" aria-label="Close dataset manager" onClick={() => setDatasetOpen(false)}>×</button></div><input aria-label="Filter datasets" placeholder="Filter datasets…" value={datasetQuery} onChange={event => setDatasetQuery(event.target.value)} /><div className="dataset-list">{datasets.filter(dataset => dataset.name.toLowerCase().includes(datasetQuery.trim().toLowerCase())).map(dataset => <div className="dataset-row" key={dataset.id}><span>{dataset.name}</span>{editable && <button className="danger" onClick={() => void deleteDataset(dataset)}>Delete</button>}</div>)}</div></section>}{run && runOpen && <RunPanel run={run} history={runHistory} nodes={nodeRuns} editable={editable} choose={selectedRun => void loadRun(selectedRun)} cancel={() => void cancelRun()} download={(artifactId, csv) => void downloadArtifact(artifactId, csv)} viewComparison={artifactId => void viewComparison(artifactId)} close={() => setRunOpen(false)} />}{comparison && <ComparisonPanel comparison={comparison} close={() => setComparison(null)} />}<div className="editor-body"><div className="canvas"><ReactFlow nodeTypes={nodeTypes} defaultEdgeOptions={{ zIndex: 10 }} nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} isValidConnection={validConnection} onConnect={connection => { if (validConnection(connection)) { remember(); setEdges(current => addEdge({ ...connection, id: `${connection.source}-${connection.target}-${Date.now()}` }, current)) } }} onNodeClick={(_, node) => { setSelectedId(node.id); setSelectedEdgeId(null) }} onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedId(null) }} onPaneClick={() => { setSelectedId(null); setSelectedEdgeId(null) }} deleteKeyCode={null} nodesDraggable={editable} nodesConnectable={editable} elementsSelectable={editable} fitView><Background /><Controls /></ReactFlow></div>{selected && selectedDefinition ? <Inspector node={selected} definition={selectedDefinition} version={selectedVersion} datasets={datasets} editable={editable} change={update} remove={removeSelectedNode} /> : <aside className="node-inspector"><p className="muted">Select a node to configure it. Select a connector to delete it from the toolbar.</p></aside>}</div></section>
+  async function duplicateWorkflow() {
+    if (!active) return;
+    const name = window.prompt("Name for the duplicate", `${active.name} copy`)?.trim();
+    if (!name) return;
+    try {
+      const duplicate = await api<Workflow>(`/api/v1/workflows/${active.id}/duplicate`, {
+        method: "POST",
+        headers: headers(session),
+        body: JSON.stringify({ name }),
+      });
+      setWorkflows((current) => [...current, duplicate].sort((a, b) => a.name.localeCompare(b.name)));
+      await select(duplicate);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not duplicate workflow.");
+    }
+  }
+  async function deleteWorkflow() {
+    if (!active || !window.confirm(`Delete workflow “${active.name}”? Its immutable revisions and run evidence will be retained.`)) return;
+    try {
+      await api<void>(`/api/v1/workflows/${active.id}`, {
+        method: "DELETE",
+        headers: headers(session),
+      });
+      const remaining = workflows.filter((item) => item.id !== active.id);
+      setWorkflows(remaining);
+      setActive(null);
+      setNodes([]);
+      setEdges([]);
+      setSelectedId(null);
+      if (remaining[0]) await select(remaining[0]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not delete workflow.");
+    }
+  }
+  async function deleteDataset(dataset: Dataset) {
+    if (!window.confirm(`Delete dataset “${dataset.name}”? Existing run evidence will be retained.`)) return;
+    try {
+      await api<void>(`/api/v1/datasets/${dataset.id}`, {
+        method: "DELETE",
+        headers: headers(session),
+      });
+      await refreshDatasets();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not delete dataset.");
+    }
+  }
+  async function upload(file: File) {
+    const form = new FormData();
+    form.set("name", file.name.replace(/\.(csv|tsv)$/i, ""));
+    form.set("file", file);
+    try {
+      const response = await fetch(`/api/v1/projects/${projectId}/datasets`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: session.csrf_token ? { "X-CSRF-Token": session.csrf_token } : {},
+        body: form,
+      });
+      if (!response.ok) throw new Error("Upload failed.");
+      setPreview(await response.json());
+      await refreshDatasets();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not ingest dataset.");
+    }
+  }
+  async function importQuaPy() {
+    if (!sourceId || !sourceDataset) return;
+    try {
+      const result = await api<DatasetVersion>(`/api/v1/projects/${projectId}/datasets/quapy`, {
+        method: "POST",
+        headers: headers(session),
+        body: JSON.stringify({
+          source_id: sourceId,
+          dataset_name: sourceDataset,
+          options: sourceOptions,
+        }),
+      });
+      setPreview(result);
+      setImportOpen(false);
+      await refreshDatasets();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not import QuaPy dataset.");
+    }
+  }
+  function validConnection(connection: Connection | Edge) {
+    const source = nodes.find((node) => node.id === connection.source);
+    const target = nodes.find((node) => node.id === connection.target);
+    if (!source || !target || !connection.sourceHandle || !connection.targetHandle || source.id === target.id) return false;
+    const output = source.data.outputs.find((port) => port.name === connection.sourceHandle);
+    const input = target.data.inputs.find((port) => port.name === connection.targetHandle);
+    return output?.data_type === input?.data_type && !edges.some((edge) => edge.target === target.id && edge.targetHandle === input?.name);
+  }
+  function autoLayout() {
+    remember();
+    setNodes((current) =>
+      current.map((node, index) => ({
+        ...node,
+        position: {
+          x: 80 + (index % 3) * 300,
+          y: 80 + Math.floor(index / 3) * 220,
+        },
+      })),
+    );
+  }
+  function graphFromEditor(): Graph {
+    return {
+      schema_version: 1,
+      nodes: nodes.map((node) => ({
+        id: node.id,
+        type: node.data.nodeType,
+        version: node.data.version,
+        config: node.data.config,
+        position: node.position,
+      })),
+      edges: edges.map((edge) => {
+        if (!edge.sourceHandle || !edge.targetHandle) throw new Error("Every connection must join explicit named ports.");
+        return {
+          id: edge.id,
+          source: edge.source,
+          source_port: edge.sourceHandle,
+          target: edge.target,
+          target_port: edge.targetHandle,
+        };
+      }),
+    };
+  }
+  async function save(): Promise<Workflow | null> {
+    setSaving(true);
+    setError(null);
+    try {
+      const graph = graphFromEditor();
+      await api("/api/v1/workflows/validate", {
+        method: "POST",
+        headers: headers(session),
+        body: JSON.stringify(graph),
+      });
+      if (active) {
+        const revision = await api<Revision>(`/api/v1/workflows/${active.id}/revisions`, {
+          method: "POST",
+          headers: headers(session),
+          body: JSON.stringify({ graph }),
+        });
+        const workflow = { ...active, draft_revision_id: revision.id };
+        setActive(workflow);
+        setWorkflows((current) => current.map((item) => (item.id === workflow.id ? workflow : item)));
+        return workflow;
+      }
+      const name = window.prompt("Workflow name", "Untitled workflow");
+      if (!name) return null;
+      const workflow = await api<Workflow>(`/api/v1/projects/${projectId}/workflows`, {
+        method: "POST",
+        headers: headers(session),
+        body: JSON.stringify({ name, graph }),
+      });
+      setWorkflows((current) => [...current, workflow]);
+      setActive(workflow);
+      return workflow;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save workflow.");
+      return null;
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function startRun() {
+    setRunning(true);
+    setError(null);
+    try {
+      const workflow = await save();
+      if (!workflow) return;
+      const nextRun = await api<Run>(`/api/v1/projects/${projectId}/runs`, {
+        method: "POST",
+        headers: headers(session),
+        body: JSON.stringify({
+          workflow_revision_id: workflow.draft_revision_id,
+          seed,
+        }),
+      });
+      setRunHistory((current) => [nextRun, ...current.filter((item) => item.id !== nextRun.id)]);
+      await loadRun(nextRun, definitions, workflows);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not start the run.");
+    } finally {
+      setRunning(false);
+    }
+  }
+  async function cancelRun() {
+    if (!run) return;
+    try {
+      const cancelled = await api<Run>(`/api/v1/runs/${run.id}/cancel`, {
+        method: "POST",
+        headers: headers(session),
+      });
+      setRun(cancelled);
+      setRunHistory((current) => current.map((item) => (item.id === cancelled.id ? cancelled : item)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not cancel the run.");
+    }
+  }
+  async function viewComparison(artifactId: string) {
+    try {
+      setComparison(await api<Comparison>(`/api/v1/artifacts/${artifactId}/download`));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not open the comparison.");
+    }
+  }
+  async function downloadArtifact(artifactId: string, csv: boolean) {
+    try {
+      const nativeApi = (window as Window & { pywebview?: { api?: NativeDownloadApi } }).pywebview?.api;
+      if (nativeApi) {
+        const result = await nativeApi.download_artifact(artifactId, csv);
+        if (result.cancelled) return;
+        if (!result.saved) throw new Error(result.error || "The artifact could not be saved.");
+        return;
+      }
+      const suffix = csv ? "/evaluation.csv" : "/download";
+      const response = await fetch(`/api/v1/artifacts/${artifactId}${suffix}`, {
+        credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error("The artifact could not be downloaded.");
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `artifact-${artifactId}`;
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not download artifact.");
+    }
+  }
+  const source = sources.find((item) => item.id === sourceId);
+  return (
+    <section className="editor-panel">
+      <div className="editor-toolbar">
+        <select
+          value={active?.id || ""}
+          onChange={(e) => {
+            const item = workflows.find((workflow) => workflow.id === e.target.value);
+            if (item) void select(item);
+          }}
+        >
+          <option value="">New workflow</option>
+          {workflows.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.name}
+            </option>
+          ))}
+        </select>
+        {active && editable && (
+          <>
+            <button onClick={() => void renameWorkflow()}>Rename</button>
+            <button onClick={() => void duplicateWorkflow()}>Duplicate</button>
+            <button className="danger" onClick={() => void deleteWorkflow()}>
+              Delete workflow
+            </button>
+          </>
+        )}
+        <button disabled={!editable || undoStack.length === 0} onClick={undo}>
+          Undo
+        </button>
+        <button disabled={!editable || redoStack.length === 0} onClick={redo}>
+          Redo
+        </button>
+        <button disabled={!editable || nodes.length === 0} onClick={autoLayout}>
+          Auto layout
+        </button>
+        {selectedEdgeId && editable && (
+          <button className="danger" onClick={removeSelectedEdge}>
+            Delete connector
+          </button>
+        )}
+        <span className="toolbar-separator" aria-hidden="true" />
+        <button className="add-node-button" disabled={!editable} onClick={() => setNodePaletteOpen((current) => !current)}>
+          + Add node
+        </button>
+        <label className="file-button">
+          Import CSV/TSV
+          <input
+            disabled={!editable}
+            type="file"
+            accept=".csv,.tsv"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void upload(file);
+            }}
+          />
+        </label>
+        <button disabled={!editable} onClick={() => setImportOpen((current) => !current)}>
+          Import QuaPy dataset
+        </button>
+        <button onClick={() => setDatasetOpen(true)}>Datasets ({datasets.length})</button>
+        {run && !runOpen && <button onClick={() => setRunOpen(true)}>Show run history</button>}
+        <button disabled={!editable || saving || running} onClick={() => void save()}>
+          {saving && !running ? "Saving…" : "Validate & save"}
+        </button>
+        <label className="seed-field">
+          Seed
+          <input disabled={!editable || running} type="number" step="1" value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
+        </label>
+        <button className="run-button" disabled={!editable || saving || running || (run !== null && ["queued", "preparing", "running", "cancelling"].includes(run.status))} onClick={() => void startRun()}>
+          {running ? "Starting…" : "Save & run"}
+        </button>
+      </div>
+      {nodePaletteOpen && (
+        <section className="node-palette">
+          <div className="panel-heading">
+            <strong>Add node</strong>
+            <button className="panel-close" aria-label="Close node palette" onClick={() => setNodePaletteOpen(false)}>
+              ×
+            </button>
+          </div>
+          <input autoFocus aria-label="Filter node types" placeholder="Filter nodes…" value={nodeQuery} onChange={(event) => setNodeQuery(event.target.value)} />
+          <div className="node-palette-list">
+            {definitions
+              .filter((definition) => `${definition.title} ${definition.type} ${definition.category}`.toLowerCase().includes(nodeQuery.trim().toLowerCase()))
+              .map((definition) => (
+                <button
+                  key={definition.type}
+                  onClick={() => {
+                    add(definition);
+                    setNodePaletteOpen(false);
+                  }}
+                >
+                  <strong>{definition.title}</strong>
+                  <span>{definition.category}</span>
+                </button>
+              ))}
+          </div>
+        </section>
+      )}
+      {importOpen && (
+        <section className="quapy-import">
+          <div className="quapy-import-heading">
+            <strong>Import QuaPy dataset</strong>
+            <button className="icon-button" aria-label="Close QuaPy import" onClick={() => setImportOpen(false)}>
+              ×
+            </button>
+          </div>
+          <select
+            value={sourceId}
+            onChange={(e) => {
+              const item = sources.find((source) => source.id === e.target.value);
+              setSourceId(e.target.value);
+              setSourceDataset(item?.datasets[0] || "");
+              setSourceOptions({});
+            }}
+          >
+            {sources.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+          <select value={sourceDataset} onChange={(e) => setSourceDataset(e.target.value)}>
+            {source?.datasets.map((item) => (
+              <option key={item}>{item}</option>
+            ))}
+          </select>
+          {source &&
+            Object.entries(source.options).map(([key, kind]) => (
+              <label key={key}>
+                {key}
+                <input
+                  type={kind === "boolean" ? "checkbox" : "number"}
+                  checked={kind === "boolean" && sourceOptions[key] === true}
+                  value={kind === "boolean" ? undefined : value(sourceOptions[key])}
+                  onChange={(e) =>
+                    setSourceOptions((current) => ({
+                      ...current,
+                      [key]: kind === "boolean" ? e.target.checked : e.target.value === "" ? undefined : Number(e.target.value),
+                    }))
+                  }
+                />
+              </label>
+            ))}
+          <button onClick={() => void importQuaPy()}>Import QuaPy</button>
+        </section>
+      )}
+      {error && (
+        <div className="form-error feedback-message" role="alert">
+          <span>{error}</span>
+          <button className="icon-button" aria-label="Dismiss notification" onClick={() => setError(null)}>
+            ×
+          </button>
+        </div>
+      )}
+      {preview && (
+        <div className="dataset-preview">
+          <div>
+            <strong>{preview.row_count} rows imported</strong>
+            <span>{preview.schema.columns.map((column) => `${column.name} (${column.type})`).join(", ")}</span>
+          </div>
+          <button className="panel-close" aria-label="Dismiss dataset notification" onClick={() => setPreview(null)}>
+            ×
+          </button>
+        </div>
+      )}
+      {datasetOpen && (
+        <section className="dataset-manager">
+          <div className="panel-heading">
+            <strong>Datasets ({datasets.length})</strong>
+            <button className="panel-close" aria-label="Close dataset manager" onClick={() => setDatasetOpen(false)}>
+              ×
+            </button>
+          </div>
+          <input aria-label="Filter datasets" placeholder="Filter datasets…" value={datasetQuery} onChange={(event) => setDatasetQuery(event.target.value)} />
+          <div className="dataset-list">
+            {datasets
+              .filter((dataset) => dataset.name.toLowerCase().includes(datasetQuery.trim().toLowerCase()))
+              .map((dataset) => (
+                <div className="dataset-row" key={dataset.id}>
+                  <span>{dataset.name}</span>
+                  {editable && (
+                    <button className="danger" onClick={() => void deleteDataset(dataset)}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              ))}
+          </div>
+        </section>
+      )}
+      {run && runOpen && <RunPanel run={run} history={runHistory} nodes={nodeRuns} editable={editable} choose={(selectedRun) => void loadRun(selectedRun)} cancel={() => void cancelRun()} download={(artifactId, csv) => void downloadArtifact(artifactId, csv)} viewComparison={(artifactId) => void viewComparison(artifactId)} close={() => setRunOpen(false)} />}
+      {comparison && <ComparisonPanel comparison={comparison} close={() => setComparison(null)} />}
+      <div className="editor-body">
+        <div className="canvas">
+          <ReactFlow
+            nodeTypes={nodeTypes}
+            defaultEdgeOptions={{ zIndex: 10 }}
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            isValidConnection={validConnection}
+            onConnect={(connection) => {
+              if (validConnection(connection)) {
+                remember();
+                setEdges((current) =>
+                  addEdge(
+                    {
+                      ...connection,
+                      id: `${connection.source}-${connection.target}-${Date.now()}`,
+                    },
+                    current,
+                  ),
+                );
+              }
+            }}
+            onNodeClick={(_, node) => {
+              setSelectedId(node.id);
+              setSelectedEdgeId(null);
+            }}
+            onEdgeClick={(_, edge) => {
+              setSelectedEdgeId(edge.id);
+              setSelectedId(null);
+            }}
+            onPaneClick={() => {
+              setSelectedId(null);
+              setSelectedEdgeId(null);
+            }}
+            deleteKeyCode={null}
+            nodesDraggable={editable}
+            nodesConnectable={editable}
+            elementsSelectable={editable}
+            fitView
+          >
+            <Background />
+            <Controls />
+          </ReactFlow>
+        </div>
+        {selected && selectedDefinition ? (
+          <Inspector node={selected} definition={selectedDefinition} version={selectedVersion} datasets={datasets} editable={editable} change={update} remove={removeSelectedNode} />
+        ) : (
+          <aside className="node-inspector">
+            <p className="muted">Select a node to configure it. Select a connector to delete it from the toolbar.</p>
+          </aside>
+        )}
+      </div>
+    </section>
+  );
 }

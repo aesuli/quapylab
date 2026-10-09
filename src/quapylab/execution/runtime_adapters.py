@@ -28,6 +28,7 @@ Adapter = Callable[[Session, Run, NodeRun], None]
 
 _MATERIALIZATION_MEDIA_TYPE = "application/vnd.quapylab.quapy-materialization+pickle"
 _QUANTIFIER_MEDIA_TYPE = "application/vnd.quapylab.quapy-quantifier+pickle"
+_QUANTIFIER_SPEC_MEDIA_TYPE = "application/vnd.quapylab.quantifier-spec+json"
 _SPLIT_MEDIA_TYPE = "application/vnd.quapylab.dataset-split+json"
 _PROTOCOL_MEDIA_TYPE = "application/vnd.quapylab.protocol+json"
 _TRANSFORMER_MEDIA_TYPE = "application/vnd.quapylab.sklearn-transformer+pickle"
@@ -41,14 +42,9 @@ class RuntimeNodeExecutor:
         self._adapters: dict[tuple[str, int], Adapter] = {
             ("dataset", 1): self._dataset,
             ("split", 1): self._split,
-            ("classifier", 1): self._classifier,
+            ("logistic_regression", 1): self._classifier_algorithm,
+            ("random_forest", 1): self._classifier_algorithm,
             ("preprocessing", 1): self._preprocessing,
-            ("acc", 1): self._acc,
-            ("pcc", 1): self._pcc,
-            ("pacc", 1): self._pacc,
-            ("emq", 1): self._emq,
-            ("hdy", 1): self._hdy,
-            ("dmy", 1): self._dmy,
             ("evaluation", 1): self._evaluation,
             ("app", 1): self._app,
             ("npp", 1): self._npp,
@@ -56,6 +52,11 @@ class RuntimeNodeExecutor:
             ("report", 1): self._report,
             ("comparison", 1): self._comparison,
             ("model_selection", 1): self._model_selection,
+            ("fit_quantifier", 1): self._fit_quantifier_specification,
+            **{
+                (method, 1): self._method_quantifier_specification
+                for method in ("acc", "pcc", "pacc", "emq", "hdy", "dmy")
+            },
         }
 
     def __call__(self, session: Session, run: Run, node: NodeRun) -> None:
@@ -139,8 +140,8 @@ class RuntimeNodeExecutor:
             node.output_artifact_ids.append(validation.id)
         _log(node, "split.completed", "Recorded deterministic train/validation/test partitions.")
 
-    def _classifier(self, session: Session, run: Run, node: NodeRun) -> None:
-        spec = _classifier_spec(_config(node), run.seed)
+    def _classifier_algorithm(self, session: Session, run: Run, node: NodeRun) -> None:
+        spec = _classifier_spec({**_config(node), "kind": node.node_type}, run.seed)
         content = json.dumps(
             spec,
             sort_keys=True,
@@ -203,47 +204,50 @@ class RuntimeNodeExecutor:
             "Fitted preprocessing on training data and transformed both partitions.",
         )
 
-    def _acc(self, session: Session, run: Run, node: NodeRun) -> None:
-        self._fit_quantifier(session, run, node, "ACC")
-
-    def _pcc(self, session: Session, run: Run, node: NodeRun) -> None:
-        self._fit_quantifier(session, run, node, "PCC")
-
-    def _pacc(self, session: Session, run: Run, node: NodeRun) -> None:
-        self._fit_quantifier(session, run, node, "PACC")
-
-    def _emq(self, session: Session, run: Run, node: NodeRun) -> None:
-        self._fit_quantifier(session, run, node, "EMQ")
-
-    def _hdy(self, session: Session, run: Run, node: NodeRun) -> None:
-        self._fit_quantifier(session, run, node, "HDy")
-
-    def _dmy(self, session: Session, run: Run, node: NodeRun) -> None:
-        self._fit_quantifier(session, run, node, "DMy")
-
-    def _fit_quantifier(self, session: Session, run: Run, node: NodeRun, method_name: str) -> None:
-        training = self._collection_input(session, run, node, "train")
+    def _method_quantifier_specification(self, session: Session, run: Run, node: NodeRun) -> None:
+        method = node.node_type
         classifier_spec = self._classifier_spec_input(session, run, node)
-        classifier = _classifier_from_spec(classifier_spec)
-        try:
-            import quapy.method.aggregative as aggregative  # type: ignore[import-untyped]
-        except ImportError as error:  # pragma: no cover - deployment dependency failure
-            raise RuntimeError("QuaPy is required to execute quantifier nodes.") from error
-        quantifier_type = getattr(aggregative, method_name, None)
-        if quantifier_type is None:
-            raise RuntimeError(f"Installed QuaPy does not provide {method_name}.")
-        try:
-            constructor = signature(quantifier_type).parameters
-            options = {"n_jobs": 1} if "n_jobs" in constructor else {}
-            quantifier = quantifier_type(classifier, **options)
-        except TypeError:  # pragma: no cover - accommodates a QuaPy-compatible adapter surface
-            quantifier = quantifier_type()
-            quantifier.classifier = classifier
+        options = _quantifier_options(method, _config(node))
+        specification = {
+            "schema_version": 1,
+            "method": method,
+            "classifier": classifier_spec,
+            "options": options,
+        }
+        artifact = self._artifacts.create(
+            session,
+            group_id=_run_group_id(session, run),
+            producing_run_id=run.id,
+            producing_node_run_id=node.id,
+            kind="quantifier-spec",
+            media_type=_QUANTIFIER_SPEC_MEDIA_TYPE,
+            content=json.dumps(specification, sort_keys=True, separators=(",", ":")).encode(),
+            serialization={"format": "json", "schema_version": 1},
+        )
+        node.output_artifact_ids = [artifact.id]
+        _log(node, "quantifier.resolved", f"Resolved unfitted {method.upper()} specification.")
+
+    def _fit_quantifier_specification(self, session: Session, run: Run, node: NodeRun) -> None:
+        training = self._collection_input(session, run, node, "train")
+        specification = self._quantifier_spec_input(session, run, node)
+        method = specification["method"]
+        classifier = _classifier_from_spec(specification["classifier"])
+        quantifier = _new_quantifier(method, classifier, specification["options"])
+        self._fit_and_store_quantifier(session, run, node, training, quantifier, method.upper())
+
+    def _fit_and_store_quantifier(
+        self,
+        session: Session,
+        run: Run,
+        node: NodeRun,
+        training: Any,
+        quantifier: Any,
+        method_name: str,
+    ) -> None:
         if len(signature(quantifier.fit).parameters) >= 2:
             quantifier.fit(training.instances, training.labels)
-        else:  # Supports QuaPy-compatible adapters with a collection-oriented fit contract.
+        else:
             quantifier.fit(training)
-        content = pickle.dumps(quantifier, protocol=pickle.HIGHEST_PROTOCOL)
         artifact = self._artifacts.create(
             session,
             group_id=_run_group_id(session, run),
@@ -251,15 +255,15 @@ class RuntimeNodeExecutor:
             producing_node_run_id=node.id,
             kind="quapy-quantifier",
             media_type=_QUANTIFIER_MEDIA_TYPE,
-            content=content,
-            serialization={"format": "pickle", "trusted_producer": "workflow-runtime"},
+            content=pickle.dumps(quantifier, protocol=pickle.HIGHEST_PROTOCOL),
+            serialization={
+                "format": "pickle",
+                "trusted_producer": "workflow-runtime",
+                "method": method_name.lower(),
+            },
         )
         node.output_artifact_ids = [artifact.id]
-        _log(
-            node,
-            f"{method_name.lower()}.fitted",
-            f"Fitted {method_name} quantifier on the training split.",
-        )
+        _log(node, f"{method_name.lower()}.fitted", f"Fitted {method_name} quantifier.")
 
     def _evaluation(self, session: Session, run: Run, node: NodeRun) -> None:
         test = self._collection_input(session, run, node, "test")
@@ -273,7 +277,7 @@ class RuntimeNodeExecutor:
         metrics = _evaluation_metrics(actual, estimated, len(test.instances))
         result = {
             "schema_version": 1,
-            "quantifier": _input_source_node(session, run, node, "quantifier").node_type,
+            "quantifier": self._quantifier_method_input(session, run, node),
             "metric": "mae",
             "value": metrics["ae"],
             "metrics": metrics,
@@ -358,7 +362,7 @@ class RuntimeNodeExecutor:
         result = {
             "schema_version": 2,
             "protocol": json.loads(self._artifacts.read_for_worker(artifact))["kind"],
-            "quantifier": _input_source_node(session, run, node, "quantifier").node_type,
+            "quantifier": self._quantifier_method_input(session, run, node),
             "classes": classes,
             "metrics": {
                 aggregate: sum(item["metrics"][base] for item in samples) / len(samples)
@@ -462,31 +466,32 @@ class RuntimeNodeExecutor:
 
     def _model_selection(self, session: Session, run: Run, node: NodeRun) -> None:
         training = self._collection_input(session, run, node, "train")
-        classifier_spec = self._classifier_spec_input(session, run, node)
+        quantifier_spec = self._quantifier_spec_input(session, run, node)
+        classifier_spec = quantifier_spec["classifier"]
         protocol_artifact = _input_artifact(session, run, node, "validation_protocol")
         protocol, _classes = _load_protocol(session, run, protocol_artifact, self._artifacts)
         config = _model_selection_config(_config(node), classifier_spec)
         classifier = _classifier_from_spec(classifier_spec)
         try:
-            import quapy.method.aggregative as aggregative
             from quapy.model_selection import GridSearchQ  # type: ignore[import-untyped]
         except ImportError as error:  # pragma: no cover - deployment dependency failure
             raise RuntimeError("QuaPy is required to execute model selection.") from error
-        quantifier_type = getattr(aggregative, config["method"].upper(), None)
-        if quantifier_type is None:
-            raise RuntimeError(f"Installed QuaPy does not provide {config['method'].upper()}.")
-        constructor = signature(quantifier_type).parameters
-        quantifier_options = {"n_jobs": 1} if "n_jobs" in constructor else {}
-        quantifier = quantifier_type(classifier, **quantifier_options)
+        method = quantifier_spec["method"]
+        if method not in {"acc", "pacc"}:
+            raise ValueError(
+                "Initial GridSearchQ support is limited to ACC and PACC specifications."
+            )
+        quantifier = _new_quantifier(method, classifier, quantifier_spec["options"])
         search = GridSearchQ(
             quantifier,
             {config["parameter_name"]: config["classifier_values"]},
             protocol,
             error=config["error"],
             refit=config["refit"],
+            timeout=config["timeout"],
             n_jobs=1,
-            raise_errors=False,
-            verbose=False,
+            raise_errors=config["raise_errors"],
+            verbose=config["verbose"],
         )
         search.fit(training.instances, training.labels)
         model_artifact = self._artifacts.create(
@@ -501,13 +506,17 @@ class RuntimeNodeExecutor:
                 "format": "pickle",
                 "trusted_producer": "workflow-runtime",
                 "selected_by": "GridSearchQ",
+                "method": method,
             },
         )
         result = {
             "schema_version": 1,
-            "method": config["method"],
+            "method": method,
             "error": config["error"],
             "refit": config["refit"],
+            "timeout": config["timeout"],
+            "raise_errors": config["raise_errors"],
+            "verbose": config["verbose"],
             "n_jobs": 1,
             "parameter_grid": {config["parameter_name"]: config["classifier_values"]},
             "best_params": search.best_params_,
@@ -533,7 +542,7 @@ class RuntimeNodeExecutor:
         _log(
             node,
             "model_selection.completed",
-            f"Selected {config['method'].upper()} parameters with {config['error'].upper()} "
+            f"Selected {method.upper()} parameters with {config['error'].upper()} "
             f"score {search.best_score_:.8g}.",
         )
 
@@ -580,6 +589,25 @@ class RuntimeNodeExecutor:
             raise RuntimeError("Classifier specification is malformed.")
         return result
 
+    def _quantifier_spec_input(self, session: Session, run: Run, node: NodeRun) -> dict[str, Any]:
+        artifact = _input_artifact(session, run, node, "quantifier")
+        if (
+            artifact.kind != "quantifier-spec"
+            or artifact.media_type != _QUANTIFIER_SPEC_MEDIA_TYPE
+            or artifact.serialization != {"format": "json", "schema_version": 1}
+        ):
+            raise RuntimeError("Quantifier input is not a trusted quantifier specification.")
+        result = json.loads(self._artifacts.read_for_worker(artifact))
+        if (
+            not isinstance(result, dict)
+            or result.get("schema_version") != 1
+            or not isinstance(result.get("method"), str)
+            or not isinstance(result.get("classifier"), dict)
+            or not isinstance(result.get("options"), dict)
+        ):
+            raise RuntimeError("Quantifier specification is malformed.")
+        return result
+
     def _quantifier_input(self, session: Session, run: Run, node: NodeRun) -> Any:
         artifact = _input_artifact(session, run, node, "quantifier")
         serialization = artifact.serialization
@@ -591,6 +619,13 @@ class RuntimeNodeExecutor:
         ):
             raise RuntimeError("Quantifier input is not a trusted QuaPy runtime artifact.")
         return _load_pickle(self._artifacts, artifact)
+
+    def _quantifier_method_input(self, session: Session, run: Run, node: NodeRun) -> str:
+        artifact = _input_artifact(session, run, node, "quantifier")
+        method = artifact.serialization.get("method")
+        if not isinstance(method, str):
+            raise RuntimeError("Fitted quantifier artifact does not identify its method.")
+        return method
 
     def _store_materialization(
         self, session: Session, run: Run, node: NodeRun, data: Any
@@ -806,22 +841,51 @@ def _load_split_partition(
     return data.sampling_from_index(indices)
 
 
-def _protocol_config(kind: str, config: dict[str, Any], run_seed: int) -> dict[str, int]:
-    allowed = {"sample_size", "repeats", "seed"}
+def _protocol_config(kind: str, config: dict[str, Any], run_seed: int) -> dict[str, Any]:
+    allowed = {"sample_size", "repeats", "seed", "return_type"}
     if kind == "app":
-        allowed.add("n_prevalences")
+        allowed.update({"n_prevalences", "smooth_limits_epsilon", "sanity_check"})
     if set(config) - allowed:
         raise ValueError(f"{kind.upper()} node config contains unsupported settings.")
-    defaults = {"sample_size": 100, "repeats": 1 if kind == "app" else 100, "seed": run_seed}
+    defaults: dict[str, Any] = {
+        "sample_size": None,
+        "repeats": 10 if kind == "app" else 100,
+        "seed": run_seed,
+        "return_type": "sample_prev",
+    }
     if kind == "app":
-        defaults["n_prevalences"] = 21
+        defaults.update({"n_prevalences": 21, "smooth_limits_epsilon": 0.0, "sanity_check": 10000})
     resolved = {**defaults, **config}
-    if any(not isinstance(value, int) for value in resolved.values()):
-        raise ValueError("Protocol settings must be integers.")
-    if resolved["sample_size"] < 1 or resolved["repeats"] < 1:
-        raise ValueError("Protocol sample_size and repeats must be positive.")
-    if kind == "app" and resolved["n_prevalences"] < 2:
-        raise ValueError("APP n_prevalences must be at least two.")
+    sample_size = resolved["sample_size"]
+    if resolved["return_type"] != "sample_prev":
+        raise ValueError("Protocol return_type is fixed to sample_prev.")
+    if sample_size is not None and (
+        not isinstance(sample_size, int) or isinstance(sample_size, bool) or sample_size < 1
+    ):
+        raise ValueError("Protocol sample_size must be empty or a positive integer.")
+    if (
+        not isinstance(resolved["repeats"], int)
+        or isinstance(resolved["repeats"], bool)
+        or resolved["repeats"] < 1
+        or not isinstance(resolved["seed"], int)
+        or isinstance(resolved["seed"], bool)
+    ):
+        raise ValueError("Protocol repeats and seed must be integers, with positive repeats.")
+    if kind == "app":
+        epsilon = resolved["smooth_limits_epsilon"]
+        if (
+            not isinstance(resolved["n_prevalences"], int)
+            or isinstance(resolved["n_prevalences"], bool)
+            or resolved["n_prevalences"] < 2
+            or not isinstance(epsilon, (int, float))
+            or isinstance(epsilon, bool)
+            or not 0 <= epsilon < 0.5
+            or not isinstance(resolved["sanity_check"], int)
+            or isinstance(resolved["sanity_check"], bool)
+            or resolved["sanity_check"] < 1
+        ):
+            raise ValueError("APP prevalence, smoothing, or sanity-check settings are invalid.")
+        resolved["smooth_limits_epsilon"] = float(epsilon)
     return resolved
 
 
@@ -997,22 +1061,154 @@ def _classifier_spec(config: dict[str, Any], run_seed: int) -> dict[str, Any]:
     raise ValueError("Classifier kind is not allow-listed.")
 
 
+def _new_quantifier(method: str, classifier: Any, options: dict[str, Any]) -> Any:
+    method_names = {
+        "acc": "ACC",
+        "pcc": "PCC",
+        "pacc": "PACC",
+        "emq": "EMQ",
+        "hdy": "HDy",
+        "dmy": "DMy",
+    }
+    class_name = method_names.get(method)
+    if class_name is None:
+        raise ValueError("Quantifier method is not allow-listed.")
+    try:
+        import quapy.method.aggregative as aggregative  # type: ignore[import-untyped]
+    except ImportError as error:  # pragma: no cover - deployment dependency failure
+        raise RuntimeError("QuaPy is required to construct quantifiers.") from error
+    quantifier_type = getattr(aggregative, class_name, None)
+    if quantifier_type is None:
+        raise RuntimeError(f"Installed QuaPy does not provide {class_name}.")
+    try:
+        constructor = signature(quantifier_type).parameters
+        resolved = {key: value for key, value in options.items() if key in constructor}
+        return quantifier_type(classifier, **resolved)
+    except TypeError:  # pragma: no cover - accommodates a QuaPy-compatible adapter surface
+        quantifier = quantifier_type()
+        quantifier.classifier = classifier
+        return quantifier
+
+
+def _quantifier_options(method: str, config: dict[str, Any]) -> dict[str, Any]:
+    defaults: dict[str, dict[str, Any]] = {
+        "acc": {
+            "fit_classifier": True,
+            "n_jobs": 1,
+            "val_split": 5,
+            "solver": "minimize",
+            "method": "inversion",
+            "norm": "clip",
+        },
+        "pcc": {"fit_classifier": True, "val_split": None},
+        "pacc": {
+            "fit_classifier": True,
+            "n_jobs": 1,
+            "val_split": 5,
+            "solver": "minimize",
+            "method": "inversion",
+            "norm": "clip",
+        },
+        "emq": {
+            "fit_classifier": True,
+            "n_jobs": 1,
+            "val_split": None,
+            "exact_train_prev": True,
+            "calib": "none",
+            "on_calib_error": "raise",
+        },
+        "hdy": {"fit_classifier": True, "val_split": 5},
+        "dmy": {
+            "fit_classifier": True,
+            "n_jobs": 1,
+            "val_split": 5,
+            "nbins": 8,
+            "divergence": "HD",
+            "cdf": False,
+            "search": "optim_minimize",
+        },
+    }
+    if method not in defaults or set(config) - set(defaults[method]):
+        raise ValueError(f"{method.upper()} config contains unsupported settings.")
+    resolved = {**defaults[method], **config}
+    if resolved["fit_classifier"] is not True:
+        raise ValueError("Quantifier classifier fitting is required by this workflow contract.")
+    if "n_jobs" in resolved and resolved["n_jobs"] != 1:
+        raise ValueError("Quantifier n_jobs is fixed to one by the resource policy.")
+    if "val_split" in resolved:
+        val_split = resolved["val_split"]
+        valid_split = (
+            val_split is None
+            or (isinstance(val_split, int) and not isinstance(val_split, bool) and val_split >= 2)
+            or (isinstance(val_split, float) and math.isfinite(val_split) and 0 < val_split < 1)
+        )
+        if not valid_split:
+            raise ValueError("val_split must be empty, at least two folds, or a fraction in (0,1).")
+    if method in {"acc", "pacc"}:
+        if resolved["solver"] not in {"minimize", "exact-raise", "exact-cc"}:
+            raise ValueError("Adjustment solver is unsupported.")
+        if resolved["method"] not in {"inversion", "invariant-ratio"}:
+            raise ValueError("Adjustment method is unsupported.")
+        if resolved["norm"] not in {"clip", "mapsimplex", "condsoftmax"}:
+            raise ValueError("Adjustment normalization is unsupported.")
+    elif method == "emq":
+        if not isinstance(resolved["exact_train_prev"], bool):
+            raise ValueError("EMQ exact_train_prev must be boolean.")
+        if resolved["calib"] not in {"none", "nbvs", "bcts", "ts", "vs"}:
+            raise ValueError("EMQ calibration is unsupported.")
+        if resolved["on_calib_error"] not in {"raise", "backup"}:
+            raise ValueError("EMQ calibration error policy is unsupported.")
+        resolved["calib"] = None if resolved["calib"] == "none" else resolved["calib"]
+    elif method == "dmy":
+        if (
+            not isinstance(resolved["nbins"], int)
+            or isinstance(resolved["nbins"], bool)
+            or resolved["nbins"] < 2
+        ):
+            raise ValueError("DMy nbins must be an integer of at least two.")
+        if resolved["divergence"] not in {"HD", "topsoe"}:
+            raise ValueError("DMy divergence is unsupported.")
+        if not isinstance(resolved["cdf"], bool):
+            raise ValueError("DMy cdf must be boolean.")
+        if resolved["search"] not in {"optim_minimize", "linear_search", "ternary_search"}:
+            raise ValueError("DMy search strategy is unsupported.")
+    return resolved
+
+
 def _model_selection_config(
     config: dict[str, Any], classifier_spec: dict[str, Any]
 ) -> dict[str, Any]:
-    allowed = {"method", "classifier_values", "error", "refit"}
+    allowed = {
+        "classifier_values",
+        "error",
+        "refit",
+        "timeout",
+        "raise_errors",
+        "verbose",
+        "n_jobs",
+    }
     if set(config) - allowed:
         raise ValueError("Model-selection config contains unsupported settings.")
-    method = config.get("method", "acc")
     values = config.get("classifier_values", [0.1, 1.0, 10.0])
     error = config.get("error", "mae")
     refit = config.get("refit", True)
-    if method not in {"acc", "pacc"}:
-        raise ValueError("Model-selection method is not allow-listed.")
+    timeout = config.get("timeout", -1)
+    raise_errors = config.get("raise_errors", False)
+    verbose = config.get("verbose", False)
+    n_jobs = config.get("n_jobs", 1)
     if error not in {"mae", "mrae", "mse", "mkld", "mnkld", "mnae", "mnrae"}:
         raise ValueError("Model-selection error measure is not allow-listed.")
     if not isinstance(refit, bool):
         raise ValueError("Model-selection refit must be boolean.")
+    if (
+        not isinstance(timeout, int)
+        or isinstance(timeout, bool)
+        or timeout < -1
+        or not isinstance(raise_errors, bool)
+        or not isinstance(verbose, bool)
+        or n_jobs != 1
+    ):
+        raise ValueError("Model-selection execution policy is invalid.")
     if not isinstance(values, list) or not 1 <= len(values) <= 50:
         raise ValueError("Model selection requires between one and fifty classifier values.")
     classifier_kind = classifier_spec.get("kind")
@@ -1037,11 +1233,14 @@ def _model_selection_config(
     else:
         raise ValueError("Classifier is unsupported for model selection.")
     return {
-        "method": method,
         "classifier_values": resolved_values,
         "parameter_name": parameter_name,
         "error": error,
         "refit": refit,
+        "timeout": timeout,
+        "raise_errors": raise_errors,
+        "verbose": verbose,
+        "n_jobs": 1,
     }
 
 

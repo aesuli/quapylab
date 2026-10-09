@@ -24,17 +24,13 @@ class NativeDesktopBridge:
         if self._window is None or not isinstance(artifact_id, str):
             return {"saved": False, "error": "Native download bridge is unavailable."}
         suffix = "/evaluation.csv" if csv else "/download"
-        response = self._application.test_client().get(
-            f"/api/v1/artifacts/{artifact_id}{suffix}"
-        )
+        response = self._application.test_client().get(f"/api/v1/artifacts/{artifact_id}{suffix}")
         if response.status_code != 200:
             return {"saved": False, "error": "The artifact could not be downloaded."}
         disposition = response.headers.get("Content-Disposition", "")
         match = re.search(r'filename="?([^";]+)', disposition, flags=re.IGNORECASE)
         filename = match.group(1) if match else f"artifact-{artifact_id}"
-        paths = self._window.create_file_dialog(
-            webview.SAVE_DIALOG, save_filename=filename
-        )
+        paths = self._window.create_file_dialog(webview.SAVE_DIALOG, save_filename=filename)
         if not paths:
             return {"saved": False, "cancelled": True}
         destination = Path(paths[0] if isinstance(paths, (list, tuple)) else paths)
@@ -71,4 +67,3 @@ def run_desktop(*, smoke_test: bool = False) -> int:
     finally:
         backend.close()
     return 0
-

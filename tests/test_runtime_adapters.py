@@ -18,6 +18,8 @@ from quapylab.execution.runtime_adapters import (
     _classifier_spec,
     _comparison_result,
     _model_selection_config,
+    _protocol_config,
+    _quantifier_options,
     _tabular_transformer,
 )
 from quapylab.persistence.models import Artifact, Dataset, DatasetVersion, Project
@@ -154,7 +156,7 @@ def test_comparison_rejects_unpaired_ground_truth() -> None:
 
 def test_model_selection_grid_is_allowlisted_for_the_classifier() -> None:
     logistic = _model_selection_config(
-        {"method": "pacc", "classifier_values": [0.1, 1], "error": "mae"},
+        {"classifier_values": [0.1, 1], "error": "mae"},
         {"kind": "logistic_regression"},
     )
     assert logistic["parameter_name"] == "classifier__C"
@@ -167,6 +169,50 @@ def test_model_selection_grid_is_allowlisted_for_the_classifier() -> None:
         _model_selection_config({"classifier_values": [10.5]}, {"kind": "random_forest"})
     with pytest.raises(ValueError, match="one and fifty"):
         _model_selection_config({"classifier_values": []}, {"kind": "logistic_regression"})
+
+
+def test_quapy_node_options_resolve_native_defaults_and_constraints() -> None:
+    assert _quantifier_options("acc", {}) == {
+        "fit_classifier": True,
+        "n_jobs": 1,
+        "val_split": 5,
+        "solver": "minimize",
+        "method": "inversion",
+        "norm": "clip",
+    }
+    assert _quantifier_options("emq", {"calib": "bcts", "on_calib_error": "backup"}) == {
+        "fit_classifier": True,
+        "n_jobs": 1,
+        "val_split": None,
+        "exact_train_prev": True,
+        "calib": "bcts",
+        "on_calib_error": "backup",
+    }
+    assert (
+        _quantifier_options(
+            "dmy",
+            {"nbins": 16, "divergence": "topsoe", "cdf": True, "search": "linear_search"},
+        )["nbins"]
+        == 16
+    )
+    with pytest.raises(ValueError, match="val_split"):
+        _quantifier_options("hdy", {"val_split": 1})
+
+    assert _protocol_config("app", {}, 19) == {
+        "sample_size": None,
+        "repeats": 10,
+        "seed": 19,
+        "return_type": "sample_prev",
+        "n_prevalences": 21,
+        "smooth_limits_epsilon": 0.0,
+        "sanity_check": 10000,
+    }
+    assert _protocol_config("npp", {}, 23) == {
+        "sample_size": None,
+        "repeats": 100,
+        "seed": 23,
+        "return_type": "sample_prev",
+    }
 
 
 def _install_quapy(monkeypatch: object) -> None:
@@ -224,8 +270,9 @@ def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
         "nodes": [
             {"id": "dataset", "type": "dataset", "version": 1, "config": config},
             {"id": "split", "type": "split", "version": 1, "config": {}},
-            {"id": "classifier", "type": "classifier", "version": 1, "config": {}},
+            {"id": "classifier", "type": "logistic_regression", "version": 1, "config": {}},
             {"id": "acc", "type": "acc", "version": 1, "config": {}},
+            {"id": "fit", "type": "fit_quantifier", "version": 1, "config": {}},
             {"id": "evaluation", "type": "evaluation", "version": 1, "config": {}},
             {"id": "report", "type": "report", "version": 1, "config": {}},
         ],
@@ -241,7 +288,7 @@ def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
                 "id": "split-acc",
                 "source": "split",
                 "source_port": "train",
-                "target": "acc",
+                "target": "fit",
                 "target_port": "train",
             },
             {
@@ -252,8 +299,15 @@ def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
                 "target_port": "classifier",
             },
             {
-                "id": "two",
+                "id": "acc-fit",
                 "source": "acc",
+                "source_port": "quantifier",
+                "target": "fit",
+                "target_port": "quantifier",
+            },
+            {
+                "id": "two",
+                "source": "fit",
                 "source_port": "quantifier",
                 "target": "evaluation",
                 "target_port": "quantifier",
@@ -390,8 +444,9 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "version": 1,
                 "config": {"train_proportion": 0.7},
             },
-            {"id": "classifier", "type": "classifier", "version": 1, "config": {}},
+            {"id": "classifier", "type": "logistic_regression", "version": 1, "config": {}},
             {"id": "acc", "type": "acc", "version": 1, "config": {}},
+            {"id": "fit", "type": "fit_quantifier", "version": 1, "config": {}},
             {"id": "evaluation", "type": "evaluation", "version": 1, "config": {}},
         ],
         "edges": [
@@ -406,7 +461,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "id": "split-acc",
                 "source": "split",
                 "source_port": "train",
-                "target": "acc",
+                "target": "fit",
                 "target_port": "train",
             },
             {
@@ -417,8 +472,15 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "target_port": "classifier",
             },
             {
-                "id": "acc-evaluation",
+                "id": "acc-fit",
                 "source": "acc",
+                "source_port": "quantifier",
+                "target": "fit",
+                "target_port": "quantifier",
+            },
+            {
+                "id": "acc-evaluation",
+                "source": "fit",
                 "source_port": "quantifier",
                 "target": "evaluation",
                 "target_port": "quantifier",
@@ -532,7 +594,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
             "id": "preprocessing-acc",
             "source": "preprocessing",
             "source_port": "train",
-            "target": "acc",
+            "target": "fit",
             "target_port": "train",
         },
         {
@@ -543,9 +605,9 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
             "target_port": "test",
         },
     ]
-    classifier_node = next(node for node in graph["nodes"] if node["type"] == "classifier")
+    classifier_node = next(node for node in graph["nodes"] if node["id"] == "classifier")
+    classifier_node["type"] = "random_forest"
     classifier_node["config"] = {
-        "kind": "random_forest",
         "n_estimators": 11,
         "max_depth": 3,
     }
@@ -567,7 +629,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
         node for node in preprocessing_nodes if node["node_type"] == "preprocessing"
     )
     classifier_result = next(
-        node for node in preprocessing_nodes if node["node_type"] == "classifier"
+        node for node in preprocessing_nodes if node["node_type"] == "random_forest"
     )
     classifier_spec = json.loads(
         client.get(f"/api/v1/artifacts/{classifier_result['output_artifact_ids'][0]}/download").data
@@ -615,7 +677,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
         },
         {
             "id": "acc-protocol-evaluation",
-            "source": "acc",
+            "source": "fit",
             "source_port": "quantifier",
             "target": "protocol-evaluation",
             "target_port": "quantifier",
@@ -668,6 +730,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
     graph["nodes"].extend(
         [
             {"id": "pacc", "type": "pacc", "version": 1, "config": {}},
+            {"id": "fit-pacc", "type": "fit_quantifier", "version": 1, "config": {}},
             {
                 "id": "pacc-protocol-evaluation",
                 "type": "protocol_evaluation",
@@ -680,10 +743,10 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
     graph["edges"].extend(
         [
             {
-                "id": "preprocessing-pacc",
+                "id": "preprocessing-fit-pacc",
                 "source": "preprocessing",
                 "source_port": "train",
-                "target": "pacc",
+                "target": "fit-pacc",
                 "target_port": "train",
             },
             {
@@ -694,8 +757,15 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "target_port": "classifier",
             },
             {
-                "id": "pacc-protocol",
+                "id": "pacc-fit-pacc",
                 "source": "pacc",
+                "source_port": "quantifier",
+                "target": "fit-pacc",
+                "target_port": "quantifier",
+            },
+            {
+                "id": "pacc-protocol",
+                "source": "fit-pacc",
                 "source_port": "quantifier",
                 "target": "pacc-protocol-evaluation",
                 "target_port": "quantifier",
@@ -766,9 +836,9 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
             },
             {
                 "id": "selection-classifier",
-                "type": "classifier",
+                "type": "logistic_regression",
                 "version": 1,
-                "config": {"kind": "logistic_regression", "max_iter": 1000},
+                "config": {"max_iter": 1000},
             },
             {
                 "id": "validation-app",
@@ -777,16 +847,22 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "config": {"sample_size": 4, "n_prevalences": 3, "repeats": 1},
             },
             {
+                "id": "acc-specification",
+                "type": "acc",
+                "version": 1,
+                "config": {},
+            },
+            {
                 "id": "selection",
                 "type": "model_selection",
                 "version": 1,
                 "config": {
-                    "method": "acc",
                     "classifier_values": [0.1, 1.0],
                     "error": "mae",
                     "refit": True,
                 },
             },
+            {"id": "direct-spec-fit", "type": "fit_quantifier", "version": 1, "config": {}},
             {"id": "held-out-evaluation", "type": "evaluation", "version": 1, "config": {}},
         ],
         "edges": [
@@ -815,8 +891,15 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "id": "selection-classifier-spec",
                 "source": "selection-classifier",
                 "source_port": "classifier",
-                "target": "selection",
+                "target": "acc-specification",
                 "target_port": "classifier",
+            },
+            {
+                "id": "selection-quantifier-spec",
+                "source": "acc-specification",
+                "source_port": "quantifier",
+                "target": "selection",
+                "target_port": "quantifier",
             },
             {
                 "id": "selection-validation-protocol",
@@ -824,6 +907,20 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "source_port": "protocol",
                 "target": "selection",
                 "target_port": "validation_protocol",
+            },
+            {
+                "id": "direct-spec-fit-training",
+                "source": "selection-split",
+                "source_port": "train",
+                "target": "direct-spec-fit",
+                "target_port": "train",
+            },
+            {
+                "id": "direct-spec-fit-quantifier",
+                "source": "acc-specification",
+                "source_port": "quantifier",
+                "target": "direct-spec-fit",
+                "target_port": "quantifier",
             },
             {
                 "id": "selected-quantifier-evaluation",
@@ -881,3 +978,5 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
     assert evidence["n_jobs"] == 1
     held_out = next(node for node in selection_nodes if node["node_id"] == "held-out-evaluation")
     assert held_out["state"] == "succeeded"
+    fitted = next(node for node in selection_nodes if node["node_id"] == "direct-spec-fit")
+    assert fitted["state"] == "succeeded"

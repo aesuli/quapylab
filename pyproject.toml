@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quapylab"
-version = "0.1.0a0"
+version = "0.1.0"
 description = "A visual laboratory for reproducible QuaPy quantification experiments"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-license = "BSD-3-Clause"
+license = "AGPL-3.0-only"
 authors = [{ name = "QuaPy Lab contributors" }]
 dependencies = [
   "alembic>=1.15,<2",
@@ -57,4 +57,3 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.11"
 strict = true
 packages = ["quapylab"]
-

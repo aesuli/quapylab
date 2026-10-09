@@ -59,8 +59,11 @@ class LocalWorker:
                     self._runs.finish_cancelled(session, run)
                     return True
                 node = next(
-                    (item for item in self._runs.list_nodes_for_worker(session, run.id)
-                     if item.state == "pending"),
+                    (
+                        item
+                        for item in self._runs.list_nodes_for_worker(session, run.id)
+                        if item.state == "pending"
+                    ),
                     None,
                 )
                 if node is None:

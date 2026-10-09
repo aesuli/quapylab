@@ -2,13 +2,18 @@
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import copy_metadata
+
 project_root = Path(SPECPATH).parent
 
 a = Analysis(
     [str(project_root / "packaging" / "desktop_entry.py")],
     pathex=[str(project_root / "src")],
     binaries=[],
-    datas=[(str(project_root / "src" / "quapylab" / "static"), "quapylab/static")],
+    datas=[
+        (str(project_root / "src" / "quapylab" / "static"), "quapylab/static"),
+        *copy_metadata("quapylab"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -39,4 +44,3 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
-

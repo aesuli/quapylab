@@ -30,8 +30,9 @@ def graph() -> dict[str, object]:
         "nodes": [
             {"id": "dataset", "type": "dataset", "version": 1, "config": {}},
             {"id": "split", "type": "split", "version": 1, "config": {}},
-            {"id": "classifier", "type": "classifier", "version": 1, "config": {}},
+            {"id": "classifier", "type": "logistic_regression", "version": 1, "config": {}},
             {"id": "acc", "type": "acc", "version": 1, "config": {}},
+            {"id": "fit", "type": "fit_quantifier", "version": 1, "config": {}},
             {"id": "evaluation", "type": "evaluation", "version": 1, "config": {}},
         ],
         "edges": [
@@ -43,10 +44,10 @@ def graph() -> dict[str, object]:
                 "target_port": "dataset",
             },
             {
-                "id": "split-acc",
+                "id": "split-fit",
                 "source": "split",
                 "source_port": "train",
-                "target": "acc",
+                "target": "fit",
                 "target_port": "train",
             },
             {
@@ -57,6 +58,13 @@ def graph() -> dict[str, object]:
                 "target_port": "classifier",
             },
             {
+                "id": "acc-fit",
+                "source": "acc",
+                "source_port": "quantifier",
+                "target": "fit",
+                "target_port": "quantifier",
+            },
+            {
                 "id": "split-evaluation",
                 "source": "split",
                 "source_port": "test",
@@ -65,7 +73,7 @@ def graph() -> dict[str, object]:
             },
             {
                 "id": "acc-evaluation",
-                "source": "acc",
+                "source": "fit",
                 "source_port": "quantifier",
                 "target": "evaluation",
                 "target_port": "quantifier",
@@ -99,7 +107,7 @@ def test_runs_are_enqueued_with_structured_node_logs_and_can_be_cancelled() -> N
     run = response.get_json()
     assert run["status"] == "queued"
     nodes = client.get(f"/api/v1/runs/{run['id']}/nodes").get_json()["items"]
-    assert [node["state"] for node in nodes] == ["pending"] * 5
+    assert [node["state"] for node in nodes] == ["pending"] * 6
     assert set(nodes[0]["logs"][0]) == {"timestamp", "level", "node_id", "event", "message"}
 
     cancelled = client.post(f"/api/v1/runs/{run['id']}/cancel")

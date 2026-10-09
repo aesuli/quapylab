@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Determine release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Increment patch version
+        id: version
+        shell: bash
+        run: |
+          latest_tag="$(git tag --list 'v0.1.*' --sort=-version:refname | awk '/^v0\.1\.[0-9]+$/ { print; exit }')"
+          if [[ -z "$latest_tag" ]]; then
+            version="0.1.0"
+          else
+            patch="${latest_tag##*.}"
+            version="0.1.$((patch + 1))"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }} release archive
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            executable: QuaPyLab.exe
+          - os: ubuntu-latest
+            platform: linux
+            executable: QuaPyLab
+          - os: macos-latest
+            platform: macos
+            executable: QuaPyLab
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      PLATFORM: ${{ matrix.platform }}
+      EXECUTABLE: ${{ matrix.executable }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set release version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          project_file = Path("pyproject.toml")
+          project_text = project_file.read_text()
+          updated_text, replacement_count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{os.environ["RELEASE_VERSION"]}"',
+              project_text,
+              count=1,
+          )
+          if replacement_count != 1:
+              raise RuntimeError("Could not update project version")
+          project_file.write_text(updated_text)
+          PY
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Build frontend
+        run: npm run build --prefix frontend
+
+      - name: Install application and packaging dependencies
+        run: python -m pip install ".[desktop]"
+
+      - name: Build single-file executable
+        run: python -m PyInstaller --noconfirm --clean packaging/QuaPyLab.spec
+
+      - name: Smoke-test executable
+        run: dist/${{ matrix.executable }} --smoke-test
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          files = [
+              Path("dist") / os.environ["EXECUTABLE"],
+              Path("LICENSE"),
+              Path("README.md"),
+          ]
+          missing = [str(path) for path in files if not path.is_file()]
+          if missing:
+              raise FileNotFoundError("Missing release files: " + ", ".join(missing))
+
+          archive_path = f'QuaPyLab-{os.environ["PLATFORM"]}.zip'
+          with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+              for path in files:
+                  archive.write(path, path.name)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuaPyLab-${{ matrix.platform }}
+          path: QuaPyLab-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: QuaPyLab v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: release-assets/**/*.zip

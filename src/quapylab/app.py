@@ -779,6 +779,7 @@ def _artifact_filename(artifact: Any) -> str:
         "application/vnd.quapylab.evaluation-result+json": "json",
         "application/vnd.quapylab.evaluation-comparison+json": "json",
         "application/vnd.quapylab.model-selection+json": "json",
+        "application/vnd.quapylab.quantifier-spec+json": "json",
         "application/vnd.quapylab.dataset-split+json": "json",
         "application/vnd.quapylab.protocol+json": "json",
         "text/csv": "csv",
