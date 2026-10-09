@@ -19,17 +19,38 @@ class NativeDesktopBridge:
         self._window = window
 
     def download_artifact(self, artifact_id: str, csv: bool = False) -> dict[str, Any]:
-        import webview
-
         if self._window is None or not isinstance(artifact_id, str):
             return {"saved": False, "error": "Native download bridge is unavailable."}
         suffix = "/evaluation.csv" if csv else "/download"
         response = self._application.test_client().get(f"/api/v1/artifacts/{artifact_id}{suffix}")
+        return self._save_response(response, f"artifact-{artifact_id}")
+
+    def download_export(
+        self, kind: str, resource_id: str, include_datasets: bool = False
+    ) -> dict[str, Any]:
+        """Save an authorized project/workflow export through the native dialog."""
+        if self._window is None or not re.fullmatch(r"[0-9a-fA-F-]{36}", resource_id):
+            return {"saved": False, "error": "Native download bridge is unavailable."}
+        if kind == "project":
+            path = f"/api/v1/projects/{resource_id}/export"
+        elif kind == "workflow-json":
+            path = f"/api/v1/workflows/{resource_id}/export"
+        elif kind == "workflow-python":
+            suffix = "?include_datasets=true" if include_datasets else ""
+            path = f"/api/v1/workflows/{resource_id}/export/python{suffix}"
+        else:
+            return {"saved": False, "error": "Unsupported export type."}
+        response = self._application.test_client().get(path)
+        return self._save_response(response, f"quapylab-{kind}")
+
+    def _save_response(self, response: Any, fallback_name: str) -> dict[str, Any]:
+        import webview
+
         if response.status_code != 200:
-            return {"saved": False, "error": "The artifact could not be downloaded."}
+            return {"saved": False, "error": "The export could not be downloaded."}
         disposition = response.headers.get("Content-Disposition", "")
         match = re.search(r'filename="?([^";]+)', disposition, flags=re.IGNORECASE)
-        filename = match.group(1) if match else f"artifact-{artifact_id}"
+        filename = match.group(1) if match else fallback_name
         paths = self._window.create_file_dialog(webview.SAVE_DIALOG, save_filename=filename)
         if not paths:
             return {"saved": False, "cancelled": True}

@@ -143,12 +143,15 @@ class ProjectService:
         project_id: str,
         name: str,
         description: str,
+        settings: dict[str, Any] | None = None,
     ) -> Project:
         project = self._project_for_edit(session, actor, project_id)
         if not name.strip():
             raise ValueError("Project name is required.")
         project.name = name.strip()
         project.description = description.strip()
+        if settings is not None:
+            project.settings = _project_settings(settings)
         project.version += 1
         return project
 
@@ -227,3 +230,17 @@ class ProjectService:
             MembershipRole(membership.role) if membership else None,
             permission,
         )
+
+
+def _project_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    if set(settings) - {"quapy_environment"}:
+        raise ValueError("Project settings contain unsupported entries.")
+    environment = settings.get("quapy_environment", {})
+    if not isinstance(environment, dict) or set(environment) - {"SAMPLE_SIZE"}:
+        raise ValueError("QuaPy environment contains unsupported entries.")
+    sample_size = environment.get("SAMPLE_SIZE")
+    if sample_size is not None and (
+        not isinstance(sample_size, int) or isinstance(sample_size, bool) or sample_size < 1
+    ):
+        raise ValueError("QuaPy SAMPLE_SIZE must be empty or a positive integer.")
+    return {"quapy_environment": {"SAMPLE_SIZE": sample_size}}

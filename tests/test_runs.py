@@ -100,6 +100,36 @@ def queued_run_client():
     return application, client, response
 
 
+def test_run_snapshots_the_project_quapy_environment() -> None:
+    application = create_app({"TESTING": True})
+    client = application.test_client()
+    group_id = str(desktop_actor().group_id)
+    project = client.post(
+        f"/api/v1/groups/{group_id}/projects", json={"name": "Configured experiment"}
+    ).get_json()
+    client.patch(
+        f"/api/v1/projects/{project['id']}",
+        json={
+            "name": project["name"],
+            "description": "",
+            "settings": {"quapy_environment": {"SAMPLE_SIZE": 37}},
+        },
+    )
+    workflow = client.post(
+        f"/api/v1/projects/{project['id']}/workflows",
+        json={"name": "Baseline", "graph": graph()},
+    ).get_json()
+    run_id = client.post(
+        f"/api/v1/projects/{project['id']}/runs",
+        json={"workflow_revision_id": workflow["draft_revision_id"], "seed": 42},
+    ).get_json()["id"]
+
+    with application.extensions["quapylab.database"].transaction() as session:
+        run = session.get(Run, run_id)
+        assert run is not None
+        assert run.environment["quapy_environment"] == {"SAMPLE_SIZE": 37}
+
+
 def test_runs_are_enqueued_with_structured_node_logs_and_can_be_cancelled() -> None:
     _, client, response = queued_run_client()
 

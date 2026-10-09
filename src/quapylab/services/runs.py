@@ -62,6 +62,12 @@ class RunService:
             seed=seed,
             environment={
                 "application": _environment_snapshot(),
+                "quapy_environment": dict(
+                    project.settings.get("quapy_environment", {})
+                    if isinstance(project.settings, dict)
+                    and isinstance(project.settings.get("quapy_environment", {}), dict)
+                    else {}
+                ),
                 "dataset_version_bindings": {
                     node.id: node.config["dataset_version_id"]
                     for node in graph.nodes

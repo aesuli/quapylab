@@ -85,28 +85,44 @@ class RuntimeNodeExecutor:
         data = self._collection_input(session, run, node, "dataset")
         source = _input_artifact(session, run, node, "dataset")
         version_id = _source_dataset_version_id(session, run, node)
+        train_proportion = _config(node).get("train_proportion", 0.7)
+        validation_proportion = _config(node).get("validation_proportion", 0)
+        if (
+            not isinstance(train_proportion, (int, float))
+            or isinstance(train_proportion, bool)
+            or not isinstance(validation_proportion, (int, float))
+            or isinstance(validation_proportion, bool)
+            or not 0 < train_proportion < 1
+            or not 0 <= validation_proportion < 1
+            or train_proportion + validation_proportion >= 1
+        ):
+            raise ValueError(
+                "Split proportions must leave non-empty train, validation, and test shares."
+            )
+        train_proportion = float(train_proportion)
+        validation_proportion = float(validation_proportion)
         # Built-in QuaPy datasets are already delivered as deterministic train/test splits.
         if hasattr(data, "training") and hasattr(data, "test"):
-            train = self._store_materialization(session, run, node, data.training)
-            test = self._store_materialization(session, run, node, data.test)
+            training = data.training
             validation = None
-        else:
-            train_proportion = _config(node).get("train_proportion", 0.7)
-            validation_proportion = _config(node).get("validation_proportion", 0)
-            if (
-                not isinstance(train_proportion, (int, float))
-                or isinstance(train_proportion, bool)
-                or not isinstance(validation_proportion, (int, float))
-                or isinstance(validation_proportion, bool)
-                or not 0 < train_proportion < 1
-                or not 0 <= validation_proportion < 1
-                or train_proportion + validation_proportion >= 1
-            ):
-                raise ValueError(
-                    "Split proportions must leave non-empty train, validation, and test shares."
+            if validation_proportion > 0:
+                # Preserve the provider's held-out test collection. Normalize the requested
+                # validation share over the configurable train/validation portion only.
+                validation_share = validation_proportion / (
+                    train_proportion + validation_proportion
                 )
+                train_indices, validation_indices = _stratified_train_validation_indices(
+                    training, validation_share, run.seed
+                )
+                validation = self._store_materialization(
+                    session, run, node, training.sampling_from_index(validation_indices)
+                )
+                training = training.sampling_from_index(train_indices)
+            train = self._store_materialization(session, run, node, training)
+            test = self._store_materialization(session, run, node, data.test)
+        else:
             train_indices, validation_indices, test_indices = _stratified_partition_indices(
-                data, float(train_proportion), float(validation_proportion), run.seed
+                data, train_proportion, validation_proportion, run.seed
             )
             common = {
                 "schema_version": 1,
@@ -115,8 +131,8 @@ class RuntimeNodeExecutor:
                 "source_artifact_sha256": source.sha256,
                 "seed": run.seed,
                 "strategy": "stratified",
-                "train_proportion": float(train_proportion),
-                "validation_proportion": float(validation_proportion),
+                "train_proportion": train_proportion,
+                "validation_proportion": validation_proportion,
                 "train_indices": train_indices,
                 "validation_indices": validation_indices,
                 "test_indices": test_indices,
@@ -233,7 +249,9 @@ class RuntimeNodeExecutor:
         method = specification["method"]
         classifier = _classifier_from_spec(specification["classifier"])
         quantifier = _new_quantifier(method, classifier, specification["options"])
-        self._fit_and_store_quantifier(session, run, node, training, quantifier, method.upper())
+        self._fit_and_store_quantifier(
+            session, run, node, training, quantifier, method.upper(), method=method
+        )
 
     def _fit_and_store_quantifier(
         self,
@@ -243,9 +261,12 @@ class RuntimeNodeExecutor:
         training: Any,
         quantifier: Any,
         method_name: str,
+        *,
+        method: str | None = None,
     ) -> None:
+        labels = _quantifier_training_labels(training, method)
         if len(signature(quantifier.fit).parameters) >= 2:
-            quantifier.fit(training.instances, training.labels)
+            quantifier.fit(training.instances, labels)
         else:
             quantifier.fit(training)
         artifact = self._artifacts.create(
@@ -467,20 +488,28 @@ class RuntimeNodeExecutor:
     def _model_selection(self, session: Session, run: Run, node: NodeRun) -> None:
         training = self._collection_input(session, run, node, "train")
         quantifier_spec = self._quantifier_spec_input(session, run, node)
+        method = quantifier_spec["method"]
         classifier_spec = quantifier_spec["classifier"]
         protocol_artifact = _input_artifact(session, run, node, "validation_protocol")
-        protocol, _classes = _load_protocol(session, run, protocol_artifact, self._artifacts)
+        protocol, _classes = _load_protocol(
+            session,
+            run,
+            protocol_artifact,
+            self._artifacts,
+            quantifier_method=method,
+        )
         config = _model_selection_config(_config(node), classifier_spec)
         classifier = _classifier_from_spec(classifier_spec)
         try:
             from quapy.model_selection import GridSearchQ  # type: ignore[import-untyped]
         except ImportError as error:  # pragma: no cover - deployment dependency failure
             raise RuntimeError("QuaPy is required to execute model selection.") from error
-        method = quantifier_spec["method"]
-        if method not in {"acc", "pacc"}:
+        if method not in {"acc", "pcc", "pacc", "emq", "hdy", "dmy"}:
             raise ValueError(
-                "Initial GridSearchQ support is limited to ACC and PACC specifications."
+                "Quantifier specification is unsupported by GridSearchQ."
             )
+        if method == "hdy" and len(training.classes_) != 2:
+            raise ValueError("HDy GridSearchQ requires a binary training collection.")
         quantifier = _new_quantifier(method, classifier, quantifier_spec["options"])
         search = GridSearchQ(
             quantifier,
@@ -493,7 +522,7 @@ class RuntimeNodeExecutor:
             raise_errors=config["raise_errors"],
             verbose=config["verbose"],
         )
-        search.fit(training.instances, training.labels)
+        search.fit(training.instances, _quantifier_training_labels(training, method))
         model_artifact = self._artifacts.create(
             session,
             group_id=_run_group_id(session, run),
@@ -890,7 +919,12 @@ def _protocol_config(kind: str, config: dict[str, Any], run_seed: int) -> dict[s
 
 
 def _load_protocol(
-    session: Session, run: Run, artifact: Artifact, artifacts: ArtifactService
+    session: Session,
+    run: Run,
+    artifact: Artifact,
+    artifacts: ArtifactService,
+    *,
+    quantifier_method: str | None = None,
 ) -> tuple[Any, list[str]]:
     if (
         artifact.kind != "quantification-protocol"
@@ -915,6 +949,9 @@ def _load_protocol(
         collection = _load_pickle(artifacts, source)
     else:
         raise RuntimeError("Protocol source is not a trusted labelled collection.")
+    original_classes = [str(value) for value in collection.classes_]
+    if quantifier_method == "hdy":
+        collection = _encoded_hdy_collection(collection)
     kind, config = specification.get("kind"), specification.get("config")
     if kind not in {"app", "npp"} or not isinstance(config, dict):
         raise RuntimeError("Protocol specification is malformed.")
@@ -923,12 +960,22 @@ def _load_protocol(
     except ImportError as error:  # pragma: no cover - deployment dependency failure
         raise RuntimeError("QuaPy is required to execute protocols.") from error
     protocol_type = APP if kind == "app" else NPP
+    runtime_config = dict(config)
+    # QuaPy falls back to its process-global SAMPLE_SIZE when this is None. The node
+    # contract instead defines an empty value as the full connected collection size,
+    # so resolve it locally and keep workflow execution independent of global state.
+    if runtime_config.get("sample_size") is None:
+        quapy_environment = run.environment.get("quapy_environment", {})
+        project_sample_size = (
+            quapy_environment.get("SAMPLE_SIZE") if isinstance(quapy_environment, dict) else None
+        )
+        runtime_config["sample_size"] = project_sample_size or len(collection)
     protocol = protocol_type(
         collection,
-        random_state=config["seed"],
-        **{key: value for key, value in config.items() if key != "seed"},
+        random_state=runtime_config["seed"],
+        **{key: value for key, value in runtime_config.items() if key != "seed"},
     )
-    return protocol, [str(value) for value in collection.classes_]
+    return protocol, original_classes
 
 
 def _source_dataset_version_id(session: Session, run: Run, split_node: NodeRun) -> str:
@@ -1088,6 +1135,33 @@ def _new_quantifier(method: str, classifier: Any, options: dict[str, Any]) -> An
         quantifier = quantifier_type()
         quantifier.classifier = classifier
         return quantifier
+
+
+def _quantifier_training_labels(training: Any, method: str | None) -> Any:
+    if method != "hdy":
+        return training.labels
+    return _encoded_hdy_labels(training)
+
+
+def _encoded_hdy_labels(collection: Any) -> Any:
+    try:
+        import numpy as np
+    except ImportError as error:  # pragma: no cover - supplied by QuaPy
+        raise RuntimeError("NumPy is required to encode HDy training labels.") from error
+    class_indices = {label: index for index, label in enumerate(collection.classes_)}
+    return np.asarray([class_indices[label] for label in collection.labels])
+
+
+def _encoded_hdy_collection(collection: Any) -> Any:
+    try:
+        from quapy.data.base import LabelledCollection  # type: ignore[import-untyped]
+    except ImportError as error:  # pragma: no cover - deployment dependency failure
+        raise RuntimeError("QuaPy is required to encode the HDy validation collection.") from error
+    return LabelledCollection(
+        collection.instances,
+        _encoded_hdy_labels(collection),
+        classes=list(range(len(collection.classes_))),
+    )
 
 
 def _quantifier_options(method: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -1615,6 +1689,34 @@ def _stratified_partition_indices(
     if not train or not test:
         raise ValueError("Dataset is too small to create non-empty train and test partitions.")
     return train, validation, test
+
+
+def _stratified_train_validation_indices(
+    data: Any, validation_proportion: float, seed: int
+) -> tuple[list[int], list[int]]:
+    try:
+        import numpy as np
+    except ImportError as error:  # pragma: no cover - supplied by QuaPy
+        raise RuntimeError("NumPy is required to create dataset splits.") from error
+    labels = np.asarray(data.labels)
+    random = np.random.RandomState(seed)
+    train: list[int] = []
+    validation: list[int] = []
+    for label in data.classes_:
+        indices = np.flatnonzero(labels == label)
+        random.shuffle(indices)
+        if len(indices) < 2:
+            raise ValueError(
+                "Each class needs at least two training rows to create a validation split."
+            )
+        validation_count = min(
+            max(int(round(len(indices) * validation_proportion)), 1), len(indices) - 1
+        )
+        validation.extend(int(value) for value in indices[:validation_count])
+        train.extend(int(value) for value in indices[validation_count:])
+    random.shuffle(train)
+    random.shuffle(validation)
+    return train, validation
 
 
 def _class_distribution(data: Any, indices: list[int]) -> dict[str, int]:

@@ -87,6 +87,7 @@ type Source = {
 type EditorSnapshot = { nodes: Node<Data>[]; edges: Edge[] };
 type NativeDownloadApi = {
   download_artifact: (artifactId: string, csv: boolean) => Promise<{ saved: boolean; cancelled?: boolean; error?: string }>;
+  download_export: (kind: string, resourceId: string, includeDatasets: boolean) => Promise<{ saved: boolean; cancelled?: boolean; error?: string }>;
 };
 type Comparison = {
   protocol: string;
@@ -185,6 +186,39 @@ function LabNode({ data }: NodeProps<Node<Data>>) {
 }
 
 const nodeTypes = { lab: LabNode };
+
+const paletteCategoryOrder = ["data", "preprocessing", "classifier", "quantifier", "protocol", "optimization", "evaluation", "output"];
+const paletteNodeOrder = [
+  "dataset",
+  "split",
+  "preprocessing",
+  "logistic_regression",
+  "random_forest",
+  "acc",
+  "pcc",
+  "pacc",
+  "emq",
+  "hdy",
+  "dmy",
+  "fit_quantifier",
+  "app",
+  "npp",
+  "model_selection",
+  "evaluation",
+  "protocol_evaluation",
+  "report",
+  "comparison",
+];
+const paletteRank = (items: string[], value: string) => {
+  const rank = items.indexOf(value);
+  return rank === -1 ? items.length : rank;
+};
+const sortPaletteDefinitions = (left: Definition, right: Definition) => {
+  const categoryDifference = paletteRank(paletteCategoryOrder, left.category) - paletteRank(paletteCategoryOrder, right.category);
+  if (categoryDifference !== 0) return categoryDifference;
+  const nodeDifference = paletteRank(paletteNodeOrder, left.type) - paletteRank(paletteNodeOrder, right.type);
+  return nodeDifference || left.title.localeCompare(right.title);
+};
 
 function Inspector({ node, definition, version, datasets, editable, change, remove }: { node: Node<Data>; definition: Definition; version: DatasetVersion | null; datasets: Dataset[]; editable: boolean; change: (key: string, value: unknown) => void; remove: () => void }) {
   const config = node.data.config;
@@ -716,6 +750,20 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
       setError(reason instanceof Error ? reason.message : "Could not delete workflow.");
     }
   }
+  async function importWorkflow(file: File) {
+    try {
+      const document = JSON.parse(await file.text()) as object;
+      const imported = await api<Workflow>(`/api/v1/projects/${projectId}/workflows/import`, {
+        method: "POST",
+        headers: headers(session),
+        body: JSON.stringify(document),
+      });
+      setWorkflows((current) => [...current, imported].sort((a, b) => a.name.localeCompare(b.name)));
+      await select(imported);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not import workflow.");
+    }
+  }
   async function deleteDataset(dataset: Dataset) {
     if (!window.confirm(`Delete dataset “${dataset.name}”? Existing run evidence will be retained.`)) return;
     try {
@@ -915,6 +963,30 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
       setError(reason instanceof Error ? reason.message : "Could not download artifact.");
     }
   }
+  async function exportWorkflow(kind: "workflow-json" | "workflow-python", includeDatasets = false) {
+    if (!active) return;
+    try {
+      const nativeApi = (window as Window & { pywebview?: { api?: NativeDownloadApi } }).pywebview?.api;
+      if (nativeApi) {
+        const result = await nativeApi.download_export(kind, active.id, includeDatasets);
+        if (!result.saved && !result.cancelled) throw new Error(result.error || "Export failed.");
+        return;
+      }
+      const path = kind === "workflow-json" ? `/api/v1/workflows/${active.id}/export` : `/api/v1/workflows/${active.id}/export/python${includeDatasets ? "?include_datasets=true" : ""}`;
+      const response = await fetch(path, { credentials: "same-origin" });
+      if (!response.ok) throw new Error("Export failed.");
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const filename = disposition.match(/filename="?([^";]+)/i)?.[1] || "workflow-export";
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not export workflow.");
+    }
+  }
   const source = sources.find((item) => item.id === sourceId);
   return (
     <section className="editor-panel">
@@ -942,6 +1014,22 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
             </button>
           </>
         )}
+        <label className="file-button">
+          Import workflow
+          <input
+            disabled={!editable}
+            type="file"
+            accept=".json,application/json"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void importWorkflow(file);
+              event.target.value = "";
+            }}
+          />
+        </label>
+        {active && <button onClick={() => void exportWorkflow("workflow-json")}>Export JSON</button>}
+        {active && <button onClick={() => void exportWorkflow("workflow-python")}>Export Python</button>}
+        {active && <button onClick={() => void exportWorkflow("workflow-python", true)}>Python + datasets ZIP</button>}
         <button disabled={!editable || undoStack.length === 0} onClick={undo}>
           Undo
         </button>
@@ -998,8 +1086,9 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
           </div>
           <input autoFocus aria-label="Filter node types" placeholder="Filter nodes…" value={nodeQuery} onChange={(event) => setNodeQuery(event.target.value)} />
           <div className="node-palette-list">
-            {definitions
+            {[...definitions]
               .filter((definition) => `${definition.title} ${definition.type} ${definition.category}`.toLowerCase().includes(nodeQuery.trim().toLowerCase()))
+              .sort(sortPaletteDefinitions)
               .map((definition) => (
                 <button
                   key={definition.type}

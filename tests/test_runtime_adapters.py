@@ -27,7 +27,20 @@ from quapylab.persistence.models import Artifact, Dataset, DatasetVersion, Proje
 
 class FixtureSplit:
     classes_ = ["negative", "positive"]
-    instances = [0, 1]
+
+    def __init__(
+        self,
+        instances: list[int] | None = None,
+        labels: list[str] | None = None,
+    ) -> None:
+        self.instances = instances or [0, 1, 2, 3, 4, 5]
+        self.labels = labels or ["negative"] * 3 + ["positive"] * 3
+
+    def sampling_from_index(self, indices: list[int]) -> "FixtureSplit":
+        return FixtureSplit(
+            [self.instances[index] for index in indices],
+            [self.labels[index] for index in indices],
+        )
 
     @staticmethod
     def prevalence() -> list[float]:
@@ -229,7 +242,9 @@ def _install_quapy(monkeypatch: object) -> None:
     monkeypatch.setitem(sys.modules, "quapy.method.aggregative", aggregative)  # type: ignore[attr-defined]
 
 
-def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
+def _prepared_run(
+    config: dict[str, object], split_config: dict[str, object] | None = None
+) -> tuple[object, object, str]:
     application = create_app({"TESTING": True})
     client = application.test_client()
     group_id = str(desktop_actor().group_id)
@@ -269,7 +284,12 @@ def _prepared_run(config: dict[str, object]) -> tuple[object, object, str]:
         "schema_version": 1,
         "nodes": [
             {"id": "dataset", "type": "dataset", "version": 1, "config": config},
-            {"id": "split", "type": "split", "version": 1, "config": {}},
+            {
+                "id": "split",
+                "type": "split",
+                "version": 1,
+                "config": split_config or {},
+            },
             {"id": "classifier", "type": "logistic_regression", "version": 1, "config": {}},
             {"id": "acc", "type": "acc", "version": 1, "config": {}},
             {"id": "fit", "type": "fit_quantifier", "version": 1, "config": {}},
@@ -370,6 +390,25 @@ def test_runtime_executes_and_persists_a_provenanced_evaluation(monkeypatch: obj
     assert b"Evaluation report" in rendered.data
     assert b"Node timings" in rendered.data
     assert b"Reproducibility" in rendered.data
+
+
+def test_quapy_dataset_split_produces_configured_validation_output(monkeypatch: object) -> None:
+    _install_quapy(monkeypatch)
+    application, client, run_id = _prepared_run(
+        {"dataset_version_id": "VERSION"},
+        {"train_proportion": 0.6, "validation_proportion": 0.2},
+    )
+    worker = LocalWorker(
+        application.extensions["quapylab.database"],
+        application.extensions["quapylab.runs"],
+        RuntimeNodeExecutor(application.extensions["quapylab.artifacts"]),
+    )
+
+    assert worker.run_once()
+    assert client.get(f"/api/v1/runs/{run_id}").get_json()["status"] == "succeeded"
+    nodes = client.get(f"/api/v1/runs/{run_id}/nodes").get_json()["items"]
+    split = next(node for node in nodes if node["node_type"] == "split")
+    assert len(split["output_artifact_ids"]) == 3
 
 
 def test_runtime_rejects_missing_dataset_configuration() -> None:
@@ -844,7 +883,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
                 "id": "validation-app",
                 "type": "app",
                 "version": 1,
-                "config": {"sample_size": 4, "n_prevalences": 3, "repeats": 1},
+                "config": {"n_prevalences": 3, "repeats": 1},
             },
             {
                 "id": "acc-specification",
@@ -938,6 +977,16 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
             },
         ],
     }
+    project = client.get(f"/api/v1/projects/{project_id}").get_json()
+    configured_project = client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={
+            "name": project["name"],
+            "description": project["description"],
+            "settings": {"quapy_environment": {"SAMPLE_SIZE": 4}},
+        },
+    )
+    assert configured_project.status_code == 200
     selection_workflow = client.post(
         f"/api/v1/projects/{project_id}/workflows",
         json={"name": "Leakage-safe ACC selection", "graph": selection_graph},
@@ -980,3 +1029,32 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
     assert held_out["state"] == "succeeded"
     fitted = next(node for node in selection_nodes if node["node_id"] == "direct-spec-fit")
     assert fitted["state"] == "succeeded"
+
+    for method in ("pcc", "emq", "hdy", "dmy"):
+        method_graph = json.loads(json.dumps(selection_graph))
+        method_specification = next(
+            item for item in method_graph["nodes"] if item["id"] == "acc-specification"
+        )
+        method_specification["type"] = method
+        method_workflow = client.post(
+            f"/api/v1/projects/{project_id}/workflows",
+            json={"name": f"Leakage-safe {method.upper()} selection", "graph": method_graph},
+        ).get_json()
+        method_run = client.post(
+            f"/api/v1/projects/{project_id}/runs",
+            json={"workflow_revision_id": method_workflow["draft_revision_id"], "seed": 7},
+        ).get_json()
+        assert worker.run_once()
+        method_run_result = client.get(f"/api/v1/runs/{method_run['id']}").get_json()
+        assert method_run_result["status"] == "succeeded", (method, method_run_result)
+        method_nodes = client.get(f"/api/v1/runs/{method_run['id']}/nodes").get_json()["items"]
+        method_selection = next(
+            node for node in method_nodes if node["node_type"] == "model_selection"
+        )
+        method_evidence = json.loads(
+            client.get(
+                f"/api/v1/artifacts/{method_selection['output_artifact_ids'][1]}/download"
+            ).data
+        )
+        assert method_evidence["method"] == method
+        assert method_evidence["best_params"]["classifier__C"] in [0.1, 1.0]

@@ -88,10 +88,27 @@ def test_project_and_workflow_lifecycle_operations_preserve_immutable_history() 
     ).get_json()
     updated = client.patch(
         f"/api/v1/projects/{project['id']}",
-        json={"name": "Renamed", "description": "Lifecycle test"},
+        json={
+            "name": "Renamed",
+            "description": "Lifecycle test",
+            "settings": {"quapy_environment": {"SAMPLE_SIZE": 250}},
+        },
     )
     assert updated.status_code == 200
     assert updated.get_json()["name"] == "Renamed"
+    assert updated.get_json()["settings"] == {
+        "quapy_environment": {"SAMPLE_SIZE": 250}
+    }
+
+    invalid_settings = client.patch(
+        f"/api/v1/projects/{project['id']}",
+        json={
+            "name": "Renamed",
+            "description": "Lifecycle test",
+            "settings": {"quapy_environment": {"SAMPLE_SIZE": 0}},
+        },
+    )
+    assert invalid_settings.status_code == 400
 
     workflow = client.post(
         f"/api/v1/projects/{project['id']}/workflows",

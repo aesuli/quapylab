@@ -31,6 +31,7 @@ from quapylab.services.authorization import AuthorizationError
 from quapylab.services.datasets import DatasetService
 from quapylab.services.graph_validation import GraphValidationError, validate_workflow
 from quapylab.services.groups import GroupService
+from quapylab.services.portability import PortabilityService
 from quapylab.services.projects import ProjectService
 from quapylab.services.runs import RunService
 from quapylab.services.workspace import bootstrap_desktop_workspace
@@ -75,6 +76,7 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
     app.extensions["quapylab.artifact_root"] = Path(artifact_root)
     app.extensions["quapylab.artifacts"] = artifacts
     app.extensions["quapylab.datasets"] = DatasetService(artifacts)
+    app.extensions["quapylab.portability"] = PortabilityService(artifacts)
     if not config or "SESSION_COOKIE_SECURE" not in config:
         app.config["SESSION_COOKIE_SECURE"] = not app.config.get("TESTING", False)
     if application_config.mode is DeploymentMode.DESKTOP:
@@ -375,14 +377,20 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
             if request.method == "PATCH":
                 payload = request_json()
                 name, description = payload.get("name"), payload.get("description", "")
-                if not isinstance(name, str) or not isinstance(description, str):
-                    raise ValueError("Project name and description must be strings.")
+                settings = payload.get("settings")
+                if (
+                    not isinstance(name, str)
+                    or not isinstance(description, str)
+                    or (settings is not None and not isinstance(settings, dict))
+                ):
+                    raise ValueError("Project name, description, or settings are invalid.")
                 item = service.update_project(
                     session,
                     actor=g.actor,
                     project_id=project_id,
                     name=name,
                     description=description,
+                    settings=settings,
                 )
                 return jsonify(project_json(item)), 200
             item = service.get_project(session, actor=g.actor, project_id=project_id)
@@ -642,6 +650,61 @@ def create_app(config: Mapping[str, Any] | None = None) -> Flask:
                 }
             ), 200
 
+    @app.get("/api/v1/projects/<project_id>/export")
+    def export_project(project_id: str) -> Response:
+        service: PortabilityService = app.extensions["quapylab.portability"]
+        with database.transaction() as session:
+            document = service.export_project(session, actor=g.actor, project_id=project_id)
+        return _json_download(
+            document, f"{_download_name(document['project']['name'])}.quapylab.json"
+        )
+
+    @app.post("/api/v1/groups/<group_id>/projects/import")
+    def import_project(group_id: str) -> tuple[Any, int]:
+        service: PortabilityService = app.extensions["quapylab.portability"]
+        with database.transaction() as session:
+            item = service.import_project(
+                session, actor=g.actor, group_id=group_id, document=request_json()
+            )
+            session.flush()
+            return jsonify(project_json(item)), 201
+
+    @app.get("/api/v1/workflows/<workflow_id>/export")
+    def export_workflow(workflow_id: str) -> Response:
+        service: PortabilityService = app.extensions["quapylab.portability"]
+        with database.transaction() as session:
+            document = service.export_workflow(session, actor=g.actor, workflow_id=workflow_id)
+        return _json_download(
+            document, f"{_download_name(document['workflow']['name'])}.workflow.json"
+        )
+
+    @app.post("/api/v1/projects/<project_id>/workflows/import")
+    def import_workflow(project_id: str) -> tuple[Any, int]:
+        service: PortabilityService = app.extensions["quapylab.portability"]
+        with database.transaction() as session:
+            item = service.import_workflow(
+                session, actor=g.actor, project_id=project_id, document=request_json()
+            )
+            session.flush()
+            return jsonify(workflow_json(item)), 201
+
+    @app.get("/api/v1/workflows/<workflow_id>/export/python")
+    def export_workflow_python(workflow_id: str) -> Response:
+        include_datasets = request.args.get("include_datasets", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        service: PortabilityService = app.extensions["quapylab.portability"]
+        with database.transaction() as session:
+            content, filename, media_type = service.python_export(
+                session, actor=g.actor, workflow_id=workflow_id, include_datasets=include_datasets
+            )
+        response = Response(content, mimetype=media_type)
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
     @app.route("/api/v1/workflows/<workflow_id>", methods=["GET", "PATCH", "DELETE"])
     def workflow(workflow_id: str) -> tuple[Any, int]:
         service: ProjectService = app.extensions["quapylab.projects"]
@@ -738,6 +801,17 @@ def _csv_safe(value: Any) -> str:
     return f"'{rendered}" if rendered.startswith(("=", "+", "-", "@")) else rendered
 
 
+def _download_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-.") or "export"
+
+
+def _json_download(document: dict[str, Any], filename: str) -> Response:
+    response = Response(json.dumps(document, indent=2), mimetype="application/json")
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 def _comparison_csv_response(artifact: Any, comparison: dict[str, Any]) -> Response:
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\r\n")
@@ -820,6 +894,7 @@ def project_json(project: Any) -> dict[str, Any]:
         "group_id": project.group_id,
         "name": project.name,
         "description": project.description,
+        "settings": project.settings,
         "version": project.version,
     }
 
