@@ -16,7 +16,7 @@ def graph(name: str = "dataset") -> dict[str, object]:
             {
                 "id": "dataset-acc",
                 "source": name,
-                "source_port": "dataset",
+                "source_port": "all",
                 "target": "acc",
                 "target_port": "train",
             },

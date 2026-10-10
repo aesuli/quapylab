@@ -59,7 +59,11 @@ def _dataset(node):
             "uci_multiclass": datasets.fetch_UCIMulticlassDataset,
         }
         data = loaders[source["loader"]](source["dataset"], **source.get("options", {}))
-        return data.training + data.test
+        return {
+            "all": LabelledCollection.join(data.training, data.test),
+            "train": data.training,
+            "test": data.test,
+        }
     path = Path(__file__).resolve().parent / descriptor["expected_path"]
     delimiter = "\\t" if source.get("format") == "tsv" else ","
     with path.open(encoding="utf-8-sig", newline="") as stream:
@@ -77,7 +81,9 @@ def _dataset(node):
             [[float(row[key]) if row[key] else np.nan for key in features] for row in rows]
         )
     labels = np.asarray([row[label] for row in rows])
-    return LabelledCollection(instances, labels, classes=descriptor.get("classes") or None)
+    return {
+        "all": LabelledCollection(instances, labels, classes=descriptor.get("classes") or None)
+    }
 
 
 def _split(collection, config):
@@ -198,7 +204,7 @@ def run():
         node_id, kind, config = node["id"], node["type"], node.get("config", {})
         inputs = _inputs(node_id, values)
         if kind == "dataset":
-            outputs = {"dataset": _dataset(node)}
+            outputs = _dataset(node)
         elif kind == "split":
             outputs = _split(inputs["dataset"], config)
         elif kind in {"logistic_regression", "random_forest"}:

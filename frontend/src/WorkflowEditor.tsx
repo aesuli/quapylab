@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { addEdge, Background, Connection, Controls, Edge, Handle, Node, NodeProps, Position, ReactFlow, useEdgesState, useNodesState } from "@xyflow/react";
 
 type Session = { csrf_token: string | null };
@@ -29,7 +29,10 @@ type Workflow = { id: string; name: string; draft_revision_id: string };
 type Dataset = { id: string; name: string; current_version_id: string | null };
 type DatasetVersion = {
   id: string;
-  schema: { columns: { name: string; type: string }[] };
+  schema: {
+    columns: { name: string; type: string }[];
+    splits?: { training_rows: number; test_rows: number };
+  };
   row_count: number;
 };
 type RunStatus = "queued" | "preparing" | "running" | "cancelling" | "cancelled" | "succeeded" | "failed" | "interrupted";
@@ -130,6 +133,8 @@ const propertyValue = (property: Property, config: Record<string, unknown>, name
   if (dynamic) return dynamic.values[String(config[dynamic.field] ?? "acc")];
   return property.default;
 };
+const datasetOutputs = (definition: Definition | undefined, version: DatasetVersion | undefined) =>
+  (definition?.outputs || []).filter((port) => port.name === "all" || version?.schema.splits !== undefined);
 
 function GenericPropertyInput({ property, current, editable, required, change }: { property: Property; current: unknown; editable: boolean; required: boolean; change: (value: unknown) => void }) {
   const disabled = !editable || property.readOnly === true;
@@ -472,6 +477,8 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
   const [undoStack, setUndoStack] = useState<EditorSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<EditorSnapshot[]>([]);
   const [comparison, setComparison] = useState<Comparison | null>(null);
+  const [datasetVersions, setDatasetVersions] = useState<Record<string, DatasetVersion>>({});
+  const loadingDatasetVersions = useRef(new Set<string>());
   const definitionFor = useCallback((node: Node<Data>) => definitions.find((item) => item.type === node.data.nodeType), [definitions]);
   const refreshDatasets = useCallback(async () => {
     setDatasets((await api<{ items: Dataset[] }>(`/api/v1/projects/${projectId}/datasets`)).items);
@@ -497,7 +504,7 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
               version: item.version,
               config: item.config,
               inputs: definition?.inputs || [],
-              outputs: definition?.outputs || [],
+              outputs: item.type === "dataset" ? datasetOutputs(definition, undefined) : definition?.outputs || [],
               runState: runNodes.items.find((node) => node.node_id === item.id)?.state,
             },
           };
@@ -533,7 +540,7 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
               version: item.version,
               config: item.config,
               inputs: definition?.inputs || [],
-              outputs: definition?.outputs || [],
+              outputs: item.type === "dataset" ? datasetOutputs(definition, undefined) : definition?.outputs || [],
             },
           };
         }),
@@ -578,6 +585,32 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
       .then(setSelectedVersion)
       .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load dataset columns."));
   }, [versionId]);
+  useEffect(() => {
+    const versionIds = nodes
+      .filter((node) => node.data.nodeType === "dataset")
+      .map((node) => node.data.config.dataset_version_id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    for (const id of new Set(versionIds)) {
+      if (datasetVersions[id] || loadingDatasetVersions.current.has(id)) continue;
+      loadingDatasetVersions.current.add(id);
+      void api<DatasetVersion>(`/api/v1/dataset-versions/${id}`)
+        .then((version) => setDatasetVersions((current) => ({ ...current, [id]: version })))
+        .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load dataset metadata."))
+        .finally(() => loadingDatasetVersions.current.delete(id));
+    }
+  }, [datasetVersions, nodes]);
+  useEffect(() => {
+    setNodes((current) =>
+      current.map((node) => {
+        if (node.data.nodeType !== "dataset") return node;
+        const definition = definitionFor(node);
+        const id = node.data.config.dataset_version_id;
+        const outputs = datasetOutputs(definition, typeof id === "string" ? datasetVersions[id] : undefined);
+        if (outputs.map((port) => port.name).join() === node.data.outputs.map((port) => port.name).join()) return node;
+        return { ...node, data: { ...node.data, outputs } };
+      }),
+    );
+  }, [datasetVersions, definitionFor, setNodes]);
   useEffect(() => {
     setNodes((current) =>
       current.map((node) => ({
@@ -681,7 +714,7 @@ export function WorkflowEditor({ projectId, editable, session }: { projectId: st
           version: definition.version,
           config,
           inputs: definition.inputs,
-          outputs: definition.outputs,
+          outputs: definition.type === "dataset" ? datasetOutputs(definition, undefined) : definition.outputs,
         },
       },
     ]);

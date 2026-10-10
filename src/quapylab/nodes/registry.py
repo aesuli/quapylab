@@ -181,7 +181,11 @@ def default_registry() -> NodeRegistry:
                 1,
                 "Dataset",
                 "data",
-                outputs=(PortDefinition("dataset", labelled),),
+                outputs=(
+                    PortDefinition("all", labelled),
+                    PortDefinition("train", labelled, required=False),
+                    PortDefinition("test", labelled, required=False),
+                ),
                 config_schema={
                     "type": "object",
                     "required": ["dataset_version_id"],

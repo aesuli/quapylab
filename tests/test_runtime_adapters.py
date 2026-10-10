@@ -42,6 +42,9 @@ class FixtureSplit:
             [self.labels[index] for index in indices],
         )
 
+    def __add__(self, other: "FixtureSplit") -> "FixtureSplit":
+        return FixtureSplit(self.instances + other.instances, self.labels + other.labels)
+
     @staticmethod
     def prevalence() -> list[float]:
         return [0.5, 0.5]
@@ -300,7 +303,7 @@ def _prepared_run(
             {
                 "id": "dataset-split",
                 "source": "dataset",
-                "source_port": "dataset",
+                "source_port": "all",
                 "target": "split",
                 "target_port": "dataset",
             },
@@ -492,7 +495,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
             {
                 "id": "dataset-split",
                 "source": "dataset",
-                "source_port": "dataset",
+                "source_port": "all",
                 "target": "split",
                 "target_port": "dataset",
             },
@@ -908,7 +911,7 @@ def test_runtime_materializes_a_labelled_csv_and_executes_a_split() -> None:
             {
                 "id": "dataset-selection-split",
                 "source": "dataset",
-                "source_port": "dataset",
+                "source_port": "all",
                 "target": "selection-split",
                 "target_port": "dataset",
             },

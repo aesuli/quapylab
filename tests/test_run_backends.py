@@ -238,7 +238,7 @@ def test_process_backend_completes_the_baseline_acc_report_workflow(tmp_path: Pa
             {
                 "id": "d-s",
                 "source": "dataset",
-                "source_port": "dataset",
+                "source_port": "all",
                 "target": "split",
                 "target_port": "dataset",
             },

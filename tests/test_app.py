@@ -141,6 +141,11 @@ def test_node_types_are_published_by_the_server() -> None:
     assert dmy["nbins"]["default"] == 8
     assert dmy["search"]["default"] == "optim_minimize"
     assert definitions["logistic_regression"]["outputs"][0]["data_type"] == "classifier_spec"
+    assert [port["name"] for port in definitions["dataset"]["outputs"]] == [
+        "all",
+        "train",
+        "test",
+    ]
     assert "c" in definitions["logistic_regression"]["config_schema"]["properties"]
     assert "n_estimators" in definitions["random_forest"]["config_schema"]["properties"]
     assert definitions["acc"]["inputs"][0]["data_type"] == "classifier_spec"

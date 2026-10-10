@@ -30,7 +30,7 @@ def workflow() -> dict[str, object]:
             {
                 "id": "dataset-split",
                 "source": "dataset",
-                "source_port": "dataset",
+                "source_port": "all",
                 "target": "split",
                 "target_port": "dataset",
             },

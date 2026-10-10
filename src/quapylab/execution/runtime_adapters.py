@@ -78,7 +78,17 @@ class RuntimeNodeExecutor:
         artifact = _dataset_materialization(
             session, run, node, version, config, self._artifacts, self._store_materialization
         )
-        node.output_artifact_ids = [artifact.id]
+        data = _load_pickle(self._artifacts, artifact)
+        if hasattr(data, "training") and hasattr(data, "test"):
+            all_data = data.training + data.test
+            outputs = (
+                self._store_materialization(session, run, node, all_data),
+                self._store_materialization(session, run, node, data.training),
+                self._store_materialization(session, run, node, data.test),
+            )
+            node.output_artifact_ids = [output.id for output in outputs]
+        else:
+            node.output_artifact_ids = [artifact.id]
         _log(node, "dataset.loaded", "Loaded immutable trusted QuaPy materialization.")
 
     def _split(self, session: Session, run: Run, node: NodeRun) -> None:
@@ -101,56 +111,36 @@ class RuntimeNodeExecutor:
             )
         train_proportion = float(train_proportion)
         validation_proportion = float(validation_proportion)
-        # Built-in QuaPy datasets are already delivered as deterministic train/test splits.
-        if hasattr(data, "training") and hasattr(data, "test"):
-            training = data.training
-            validation = None
-            if validation_proportion > 0:
-                # Preserve the provider's held-out test collection. Normalize the requested
-                # validation share over the configurable train/validation portion only.
-                validation_share = validation_proportion / (
-                    train_proportion + validation_proportion
-                )
-                train_indices, validation_indices = _stratified_train_validation_indices(
-                    training, validation_share, run.seed
-                )
-                validation = self._store_materialization(
-                    session, run, node, training.sampling_from_index(validation_indices)
-                )
-                training = training.sampling_from_index(train_indices)
-            train = self._store_materialization(session, run, node, training)
-            test = self._store_materialization(session, run, node, data.test)
-        else:
-            train_indices, validation_indices, test_indices = _stratified_partition_indices(
-                data, train_proportion, validation_proportion, run.seed
+        train_indices, validation_indices, test_indices = _stratified_partition_indices(
+            data, train_proportion, validation_proportion, run.seed
+        )
+        common = {
+            "schema_version": 1,
+            "source_dataset_version_id": version_id,
+            "source_artifact_id": source.id,
+            "source_artifact_sha256": source.sha256,
+            "seed": run.seed,
+            "strategy": "stratified",
+            "train_proportion": train_proportion,
+            "validation_proportion": validation_proportion,
+            "train_indices": train_indices,
+            "validation_indices": validation_indices,
+            "test_indices": test_indices,
+            "class_distribution": {
+                "train": _class_distribution(data, train_indices),
+                "validation": _class_distribution(data, validation_indices),
+                "test": _class_distribution(data, test_indices),
+            },
+        }
+        train = self._store_split_manifest(session, run, node, {**common, "partition": "train"})
+        test = self._store_split_manifest(session, run, node, {**common, "partition": "test"})
+        validation = (
+            self._store_split_manifest(
+                session, run, node, {**common, "partition": "validation"}
             )
-            common = {
-                "schema_version": 1,
-                "source_dataset_version_id": version_id,
-                "source_artifact_id": source.id,
-                "source_artifact_sha256": source.sha256,
-                "seed": run.seed,
-                "strategy": "stratified",
-                "train_proportion": train_proportion,
-                "validation_proportion": validation_proportion,
-                "train_indices": train_indices,
-                "validation_indices": validation_indices,
-                "test_indices": test_indices,
-                "class_distribution": {
-                    "train": _class_distribution(data, train_indices),
-                    "validation": _class_distribution(data, validation_indices),
-                    "test": _class_distribution(data, test_indices),
-                },
-            }
-            train = self._store_split_manifest(session, run, node, {**common, "partition": "train"})
-            test = self._store_split_manifest(session, run, node, {**common, "partition": "test"})
-            validation = (
-                self._store_split_manifest(
-                    session, run, node, {**common, "partition": "validation"}
-                )
-                if validation_indices
-                else None
-            )
+            if validation_indices
+            else None
+        )
         node.output_artifact_ids = [train.id, test.id]
         if validation is not None:
             node.output_artifact_ids.append(validation.id)
@@ -1689,34 +1679,6 @@ def _stratified_partition_indices(
     if not train or not test:
         raise ValueError("Dataset is too small to create non-empty train and test partitions.")
     return train, validation, test
-
-
-def _stratified_train_validation_indices(
-    data: Any, validation_proportion: float, seed: int
-) -> tuple[list[int], list[int]]:
-    try:
-        import numpy as np
-    except ImportError as error:  # pragma: no cover - supplied by QuaPy
-        raise RuntimeError("NumPy is required to create dataset splits.") from error
-    labels = np.asarray(data.labels)
-    random = np.random.RandomState(seed)
-    train: list[int] = []
-    validation: list[int] = []
-    for label in data.classes_:
-        indices = np.flatnonzero(labels == label)
-        random.shuffle(indices)
-        if len(indices) < 2:
-            raise ValueError(
-                "Each class needs at least two training rows to create a validation split."
-            )
-        validation_count = min(
-            max(int(round(len(indices) * validation_proportion)), 1), len(indices) - 1
-        )
-        validation.extend(int(value) for value in indices[:validation_count])
-        train.extend(int(value) for value in indices[validation_count:])
-    random.shuffle(train)
-    random.shuffle(validation)
-    return train, validation
 
 
 def _class_distribution(data: Any, indices: list[int]) -> dict[str, int]:
